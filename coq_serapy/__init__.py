@@ -374,14 +374,14 @@ class SerapiInstance(threading.Thread):
         is_section = "Let" in cmd
         for lemma in lemmas:
             self._local_lemmas.append((
-                AbstractSyntaxTree(ast, lemma), is_section
+                AbstractSyntaxTree(ast.ast, lemma), is_section
             ))
 
         for l_idx in range(len(self.local_lemmas)):
             for ol_idx in range(l_idx):
                 if l_idx == ol_idx:
                     continue
-                if self.local_lemmas[l_idx][0].str == ":":
+                if self.local_lemmas[l_idx][0] == ":":
                     continue
                 if self._local_lemmas[l_idx][1]:
                     continue
@@ -1200,7 +1200,7 @@ class SerapiInstance(threading.Thread):
                     ["Feedback", TAIL], lambda tail: True,
                     ["Answer", int, "Completed"], lambda sidx: True,
                     ['Answer', _, ["CoqExn", [_, _, _, _, _, ['str', _]]]],
-                    lambda *args: raise_(CoqExn(fin)),
+                    lambda *args: raise_(CoqExn(msg[-1])),
                     _, lambda x: False):
             msg.append(self._get_message())
 
@@ -1208,7 +1208,7 @@ class SerapiInstance(threading.Thread):
 
         ast = msg[0][2][1][0]
         assert ast[0] == Symbol('CoqAst')
-        return ast
+        return AbstractSyntaxTree(dumps(ast), stm)
 
     def count_fg_goals(self) -> int:
         if not self.proof_context:
@@ -1524,6 +1524,23 @@ def possibly_starting_proof(command: str) -> bool:
     pattern = r"(?:(?:Local|Global)\s+)?(" + "|".join(lemma_starting_patterns) + r")\s*"
     return bool(re.match(pattern,
                          stripped_command))
+
+
+def is_proof_start(coq_commands, start_idx):
+    if not possibly_starting_proof(coq_commands[start_idx]):
+        return False
+
+    # 1. find proof end,
+    # 2. If in lines between start_idx and proof_end_idx there is another
+    #    possibly starting proof, then the initial possibly starting proof
+    #    is not a starting proof.
+    i = start_idx + 1
+    while i < len(coq_commands) and not ending_proof(coq_commands[i]):
+        if possibly_starting_proof(coq_commands[i]):
+            return False
+        i += 1
+
+    return True
 
 
 def ending_proof(command: str) -> bool:
