@@ -628,39 +628,12 @@ class SerapiInstance(threading.Thread):
                 # serapi in.
                 self._update_state()
 
-                # # sometimes we need to run this method 2 times to complete the query
-                # try:
-                #     self._get_completed()
-                # except CompletedError as ex:
-                #     print(ex)
-                #     import pdb
-                #     pdb.set_trace()
-                #     self._send_acked("(Exec {})\n".format(self.cur_state))
-                #     # state_num =  match(normalizeMessage(ex.msg),
-                #     #                    ["Answer", int, list],
-                #     #                    lambda state_num, contents:
-                #     #                    match(contents,
-                #     #                          ["CoqExn", TAIL],
-                #     #                          lambda rest:
-                #     #                          raise_(CoqExn("\n".join(searchStrsInMsg(rest)))),
-                #     #                          ["Added", int, TAIL],
-                #     #                          lambda state_num, tail: state_num),
-                #     #                    _, lambda x: raise_(BadResponse(msg)))
-                #     # self._get_completed()
-                #
-                #     self._update_state()
-
                 assert self.message_queue.empty()
 
                 # # Track goal opening/closing
                 is_goal_open = re.match(r"\s*(?:\d+\s*:)?\s*[{]\s*", stm)
                 is_goal_close = re.match(r"\s*[}]\s*", stm)
                 is_unshelve = re.match(r"\s*Unshelve\s*\.\s*", stm)
-
-
-                # is_unshelve = True  # just a hack to update all_goals
-
-
 
                 # Execute the statement.
                 self._send_acked("(Exec {})\n".format(self.last_state_id))
@@ -968,11 +941,9 @@ class SerapiInstance(threading.Thread):
         self._flush_queue()
         assert self.message_queue.empty(), self.messages
 
-        state_id = self.last_state_id
-        self._states.pop()
-
         # Run the cancel
-        self._send_acked("(Cancel ({}))".format(state_id))
+        self._send_acked("(Cancel ({}))".format(self.last_state_id))
+        self._states.pop()
 
         # Get the response from cancelling
         self._get_cancelled()
@@ -2310,7 +2281,12 @@ def _split_square_brackets(tactic):
     return tactic_split
 
 
-def linearize_commands(coq, commands):
+def linearize_commands(module_path):
+    commands = load_commands(module_path, skip_comments=True)
+
+    coq = SerapiInstance(['sertop', '--implicit', '--omit_loc'], module_path.stem,
+                         str(module_path.parent), timeout=10)
+
     in_proof = False
     linear_commands = []
     for cmd in commands:
@@ -2341,10 +2317,12 @@ def linearize_commands(coq, commands):
             # run first tactic
             n_goals = len(coq.proof_context.fg_goals)
             coq.run_stmt(terms[0] + '.')
+            linear_commands.append(terms[0] + '.')
             n_tactics_to_apply = 0
             if coq.proof_context is not None:
                 n_tactics_to_apply = len(coq.proof_context.fg_goals) - n_goals + 1
 
+            # run other tactic taking into account ";" and "[ ... | ... ]" syntax
             for i, tactic in enumerate(terms[1:]):
                 tactic = _replace_bullet_tactic(tactic) + '.'
                 goal_idx = 1
@@ -2386,6 +2364,7 @@ def linearize_commands(coq, commands):
         elif coq.proof_context is None:
             in_proof = False
 
+    coq.kill()
     return linear_commands
 
 
