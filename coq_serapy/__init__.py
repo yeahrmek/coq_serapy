@@ -154,24 +154,21 @@ class TacticHistory:
         self.__cur_subgoal_depth += 1
 
         self.__subgoal_tree.append(background_subgoals)
-        pass
 
     def closeSubgoal(self) -> None:
         assert self.__cur_subgoal_depth > 0
         self.__cur_subgoal_depth -= 1
         self.__subgoal_tree.pop()
-        pass
 
     def curDepth(self) -> int:
         return self.__cur_subgoal_depth
 
-    def addTactic(self, tactic: str) -> None:
+    def addTactic(self, tactic: AbstractSyntaxTree) -> None:
         curTree = self.__tree
         for i in range(self.__cur_subgoal_depth):
             assert isinstance(curTree.children[-1], TacticTree)
             curTree = curTree.children[-1]
         curTree.children.append(tactic)
-        pass
 
     def removeLast(self, all_subgoals: List[Obligation]) -> None:
         assert len(self.__tree.children) > 0, \
@@ -190,7 +187,7 @@ class TacticHistory:
             self.__subgoal_tree.pop()
         else:
             lastChild = curTree.children[-1]
-            if isinstance(lastChild, str):
+            if isinstance(lastChild, AbstractSyntaxTree):
                 curTree.children.pop()
             else:
                 assert isinstance(lastChild, TacticTree)
@@ -203,7 +200,7 @@ class TacticHistory:
             curTree = self.__tree
             for i in range(self.__cur_subgoal_depth+1):
                 yield from (child for child in curTree.children
-                            if isinstance(child, str))
+                            if isinstance(child, AbstractSyntaxTree))
                 if i < self.__cur_subgoal_depth:
                     assert isinstance(curTree.children[-1], TacticTree)
                     curTree = curTree.children[-1]
@@ -224,7 +221,7 @@ class TacticHistory:
     def getAllBackgroundObligations(self) -> List[Obligation]:
         return [item for lst in self.__subgoal_tree for item in reversed(lst)]
 
-    def getNextCancelled(self) -> str:
+    def getNextCancelled(self) -> AbstractSyntaxTree:
         curTree = self.__tree
         assert len(curTree.children) > 0, \
             "Tried to cancel from an empty history"
@@ -237,7 +234,7 @@ class TacticHistory:
         elif isinstance(curTree.children[-1], TacticTree):
             return "}"
         else:
-            assert isinstance(curTree.children[-1], str), curTree.children[-1]
+            assert isinstance(curTree.children[-1], AbstractSyntaxTree), curTree.children[-1]
             return curTree.children[-1]
 
     def __str__(self) -> str:
@@ -255,7 +252,7 @@ class SerapiInstance(threading.Thread):
     def __init__(self, coq_command: List[str], module_name: Optional[str],
                  prelude: str,
                  timeout: int = 30, use_hammer: bool = False,
-                 log_outgoing_messages: Optional[str] = None) -> None:
+                 log_outgoing_messages: Optional[str] = None, quiet=False) -> None:
         try:
             with open(prelude + "/_CoqProject", 'r') as includesfile:
                 includes = includesfile.read()
@@ -282,7 +279,7 @@ class SerapiInstance(threading.Thread):
         # coq state. This way we don't have to do expensive queries to
         # the other process to answer simple questions.
         self.proof_context = None  # type: Optional[ProofContext]
-        self.cur_state = 0
+        self._states = [0]
         self.tactic_history = TacticHistory()
         self._local_lemmas: List[Tuple[AbstractSyntaxTree, bool]] = []
 
@@ -292,7 +289,7 @@ class SerapiInstance(threading.Thread):
         # Verbosity is zero until set otherwise
         self.verbose = 0
         # Set the "extra quiet" flag (don't print on failures) to false
-        self.quiet = False
+        self.quiet = quiet
         # The messages printed to the *response* buffer by the command
         self.feedbacks: List[Any] = []
         # Start the message queue thread
@@ -324,6 +321,10 @@ class SerapiInstance(threading.Thread):
                 raise
 
     @property
+    def last_state_id(self):
+        return self._states[-1]
+
+    @property
     def module_stack(self) -> List[str]:
         return [entry for entry, is_section in self.sm_stack
                 if not is_section]
@@ -347,11 +348,20 @@ class SerapiInstance(threading.Thread):
             self._module_changed = False
         return self._local_lemmas_cache
 
-    def _cancel_potential_local_lemmas(self, cmd: str) -> None:
-        lemmas = self._lemmas_defined_by_stmt(cmd)
-        is_section = "Let" in cmd
-        for lemma in lemmas:
-            self._local_lemmas.remove((lemma, is_section))
+    def _cancel_potential_local_lemmas(self, cmd: AbstractSyntaxTree) -> None:
+        if isinstance(cmd, AbstractSyntaxTree):
+            lemmas = self._lemmas_defined_by_stmt(cmd.str)
+            is_section = "Let" in cmd.str
+            assert len(lemmas) <= 1
+        else:
+            lemmas = self._lemmas_defined_by_stmt(cmd)
+            is_section = "Let" in cmd
+            assert len(lemmas) == 0
+
+        for _ in lemmas:
+            # self._local_lemmas.remove((lemma, is_section))
+            if (cmd, is_section) in self._local_lemmas:
+                self._local_lemmas.remove((cmd, is_section))
 
     def _remove_potential_local_lemmas(self, cmd: str) -> None:
         reset_match = re.match(r"Reset\s+(.*)\.", cmd)
@@ -370,24 +380,40 @@ class SerapiInstance(threading.Thread):
             self._local_lemmas.pop()
 
     def _add_potential_local_lemmas(self, ast, cmd: str) -> None:
-        lemmas = self._lemmas_defined_by_stmt(cmd)
+        lemmas = self._lemmas_defined_by_stmt(ast.str)
         is_section = "Let" in cmd
-        for lemma in lemmas:
-            self._local_lemmas.append((
-                AbstractSyntaxTree(ast.ast, lemma), is_section
-            ))
+        assert len(lemmas) <= 1
 
-        for l_idx in range(len(self.local_lemmas)):
-            for ol_idx in range(l_idx):
-                if l_idx == ol_idx:
-                    continue
-                if self.local_lemmas[l_idx][0] == ":":
-                    continue
-                if self._local_lemmas[l_idx][1]:
-                    continue
-                assert self.local_lemmas[l_idx] != \
-                    self.local_lemmas[ol_idx],\
-                    self.local_lemmas
+        # don't add duplicate lemmas
+        for lemma in lemmas:
+            if not lemma in self.local_lemmas:
+                self._local_lemmas.append((
+                    AbstractSyntaxTree(ast.ast, lemma), is_section
+                ))
+        # for lemma in lemmas:
+        #     self._local_lemmas.append((
+        #         AbstractSyntaxTree(ast.ast, lemma), is_section
+        #     ))
+        #
+        # for l in self._local_lemmas:
+        #     print(l, '\n')
+        #
+        # for l_idx in range(len(self.local_lemmas)):
+        #     for ol_idx in range(l_idx):
+        #         if l_idx == ol_idx:
+        #             continue
+        #         if self.local_lemmas[l_idx][0] == ":":
+        #             continue
+        #         if self._local_lemmas[l_idx][1]:
+        #             continue
+        #         try:
+        #             assert self.local_lemmas[l_idx] != \
+        #                    self.local_lemmas[ol_idx],\
+        #                    self.local_lemmas
+        #         except Exception as ex:
+        #             import pdb
+        #             pdb.set_trace()
+        #             print(ex)
 
     def _lemmas_defined_by_stmt(self, cmd: str) -> List[str]:
         cmd = kill_comments(cmd)
@@ -601,16 +627,43 @@ class SerapiInstance(threading.Thread):
                 # Get the response, which indicates what state we put
                 # serapi in.
                 self._update_state()
-                self._get_completed()
+
+                # # sometimes we need to run this method 2 times to complete the query
+                # try:
+                #     self._get_completed()
+                # except CompletedError as ex:
+                #     print(ex)
+                #     import pdb
+                #     pdb.set_trace()
+                #     self._send_acked("(Exec {})\n".format(self.cur_state))
+                #     # state_num =  match(normalizeMessage(ex.msg),
+                #     #                    ["Answer", int, list],
+                #     #                    lambda state_num, contents:
+                #     #                    match(contents,
+                #     #                          ["CoqExn", TAIL],
+                #     #                          lambda rest:
+                #     #                          raise_(CoqExn("\n".join(searchStrsInMsg(rest)))),
+                #     #                          ["Added", int, TAIL],
+                #     #                          lambda state_num, tail: state_num),
+                #     #                    _, lambda x: raise_(BadResponse(msg)))
+                #     # self._get_completed()
+                #
+                #     self._update_state()
+
                 assert self.message_queue.empty()
 
-                # Track goal opening/closing
+                # # Track goal opening/closing
                 is_goal_open = re.match(r"\s*(?:\d+\s*:)?\s*[{]\s*", stm)
                 is_goal_close = re.match(r"\s*[}]\s*", stm)
                 is_unshelve = re.match(r"\s*Unshelve\s*\.\s*", stm)
 
+
+                # is_unshelve = True  # just a hack to update all_goals
+
+
+
                 # Execute the statement.
-                self._send_acked("(Exec {})\n".format(self.cur_state))
+                self._send_acked("(Exec {})\n".format(self.last_state_id))
 
                 # Finally, get the result of the command
                 self.feedbacks.extend(self._get_feedbacks())
@@ -633,7 +686,7 @@ class SerapiInstance(threading.Thread):
 
                 # Manage the tactic history
                 if possibly_starting_proof(stm) and self.proof_context:
-                    self.tactic_history.addTactic(stm)
+                    self.tactic_history.addTactic(ast_stm)
                 elif is_goal_open:
                     assert context_before
                     self.tactic_history.openSubgoal(
@@ -644,7 +697,7 @@ class SerapiInstance(threading.Thread):
                     # If we saw a new proof context, we're still in a
                     # proof so append the command to our prev_tactics
                     # list.
-                    self.tactic_history.addTactic(stm)
+                    self.tactic_history.addTactic(ast_stm)
 
                 if return_ast:
                     ast.append(ast_stm)
@@ -661,17 +714,6 @@ class SerapiInstance(threading.Thread):
                 eprint(
                     f"History is now {self.tactic_history.getFullHistory()}")
                 summarizeContext(self.proof_context)
-            # assert len(self.tactic_history.getFullHistory()) == \
-            #     history_len_before + 1 or \
-            #     (re.match(r"(?:\d+\s*:)?\s*{", stmt.strip()) and
-            #      len(self.tactic_history.getFullHistory()) ==
-            #      history_len_before + 2) or \
-            #     (stmt.strip() == "}" and
-            #      len(self.tactic_history.getFullHistory()) ==
-            #      history_len_before) or \
-            #     self.proof_context == context_before or \
-            #     stmt.strip() == "Proof." or \
-            #     (self.proof_context is None and ending_proof(stmt))
             if timeout:
                 self.timeout = old_timeout
 
@@ -679,7 +721,6 @@ class SerapiInstance(threading.Thread):
 
     @property
     def prev_tactics(self):
-
         return self.tactic_history.getCurrentHistory()
 
     def _handle_exception(self, e: SerapiException, stmt: str):
@@ -733,11 +774,25 @@ class SerapiInstance(threading.Thread):
                           coqexn_msg):
                 self._get_completed()
                 raise CoqExn(coqexn_msg)
+            elif 'Tactician' in coqexn_msg:
+                self._get_completed()
+                raise CoqExn(coqexn_msg)
             else:
                 self._get_completed()
                 self.cancel_failed()
                 raise CoqExn(coqexn_msg)
         else:
+
+            # This is a hack that can break the code, but still
+            import warnings
+            warnings.warn('Trying `_get_completed()` second time.')
+            try:
+                self._get_completed()
+                return
+            except Exception as ex:
+                pass
+
+
             match(normalizeMessage(e.msg),
                   ['Stream\\.Error', str],
                   lambda *args: progn(self._get_completed(),
@@ -781,7 +836,6 @@ class SerapiInstance(threading.Thread):
               lambda msg: raise_(UnrecognizedError(msg)))
         self._get_completed()
         return result
-
 
     # Flush all messages in the message queue
     def _flush_queue(self) -> None:
@@ -875,14 +929,18 @@ class SerapiInstance(threading.Thread):
     # serapi. Even if the command failed after parsing, this will
     # still cancel it. You need to call this after a command that
     # fails after parsing, but not if it fails before.
-    def cancel_last(self) -> None:
+    def cancel_last(self):
+        self.cancel_last_state_id()
+
+    def cancel_last_state_id(self) -> None:
         context_before = self.proof_context
         if self.proof_context:
             if len(self.tactic_history.getFullHistory()) > 0:
                 cancelled = self.tactic_history.getNextCancelled()
                 eprint(f"Cancelling {cancelled} "
-                       f"from state {self.cur_state}",
+                       f"from state {self.last_state_id}",
                        guard=self.verbose >= 2)
+
                 self._cancel_potential_local_lemmas(cancelled)
             else:
                 eprint("Cancelling something (not in history)",
@@ -890,7 +948,7 @@ class SerapiInstance(threading.Thread):
         else:
             cancelled = ""
             eprint(f"Cancelling vernac "
-                   f"from state {self.cur_state}",
+                   f"from state {self.last_state_id}",
                    guard=self.verbose >= 2)
         self.__cancel()
 
@@ -909,10 +967,16 @@ class SerapiInstance(threading.Thread):
     def __cancel(self) -> None:
         self._flush_queue()
         assert self.message_queue.empty(), self.messages
+
+        state_id = self.last_state_id
+        self._states.pop()
+
         # Run the cancel
-        self._send_acked("(Cancel ({}))".format(self.cur_state))
+        self._send_acked("(Cancel ({}))".format(state_id))
+
         # Get the response from cancelling
-        self.cur_state = self._get_cancelled()
+        self._get_cancelled()
+
         # Get a new proof context, if it exists
         self._get_proof_context()
 
@@ -935,14 +999,15 @@ class SerapiInstance(threading.Thread):
         match(normalizeMessage(completed),
               ["Answer", int, "Completed"], lambda state: None,
               _, lambda msg: raise_(CompletedError(completed)))
+        return completed
 
     def add_lib(self, origpath: str, logicalpath: str) -> None:
         addStm = ("(Add () \"Add LoadPath \\\"{}\\\" as {}.\")\n"
                   .format(origpath, logicalpath))
         self._send_acked(addStm)
         self._update_state()
-        self._get_completed()
-        self._send_acked("(Exec {})\n".format(self.cur_state))
+        # self._get_completed()
+        self._send_acked("(Exec {})\n".format(self.last_state_id))
         self._discard_feedback()
         self._discard_feedback()
         self._get_completed()
@@ -952,8 +1017,8 @@ class SerapiInstance(threading.Thread):
                   .format(path))
         self._send_acked(addStm)
         self._update_state()
-        self._get_completed()
-        self._send_acked("(Exec {})\n".format(self.cur_state))
+        # self._get_completed()
+        self._send_acked("(Exec {})\n".format(self.last_state_id))
         self._discard_feedback()
         self._discard_feedback()
         self._get_completed()
@@ -963,8 +1028,8 @@ class SerapiInstance(threading.Thread):
                   .format(origpath, logicalpath))
         self._send_acked(addStm)
         self._update_state()
-        self._get_completed()
-        self._send_acked("(Exec {})\n".format(self.cur_state))
+        # self._get_completed()
+        self._send_acked("(Exec {})\n".format(self.last_state_id))
         self._discard_feedback()
         self._discard_feedback()
         self._get_completed()
@@ -1038,34 +1103,32 @@ class SerapiInstance(threading.Thread):
             self.add_ocaml_lib("./" + imatch.group(1))
 
     def _update_state(self) -> None:
-        self.cur_state, self.feedbacks = self._get_next_state()
+        new_state, self.feedbacks = self._get_next_state()
+        if new_state is not None:
+            self._states.append(new_state)
 
     def _unset_printing_notations(self) -> None:
         self._send_acked("(Add () \"Unset Printing Notations.\")\n")
         self._update_state()
-        self._get_completed()
+        # self._get_completed()
 
     def _get_next_state(self) -> int:
         msg = self._get_message()
         feedbacks = []
-        while match(normalizeMessage(msg),
-                    ["Feedback", TAIL], lambda tail: True,
-                    ["Answer", int, "Completed"], lambda sidx: True,
-                    _, lambda x: False):
+
+        state_num = None
+        while not match(normalizeMessage(msg),
+                        ["Answer", int, "Completed"], lambda sidx: True,
+                        ["Answer", int, ["CoqExn", TAIL]], lambda *args: raise_(CoqExn(msg)),
+                        _, lambda x: False,):
             if msg[0] == Symbol('Feedback'):
                 feedbacks.append(msg)
+            else:
+                state_num = [int(s) for s in re.findall(r"\(Added (?P<state_id>\d+)", dumps(msg))]
+                state_num = state_num[-1] if state_num else None
             msg = self._get_message()
 
-        return match(normalizeMessage(msg),
-                     ["Answer", int, list],
-                     lambda state_num, contents:
-                     match(contents,
-                           ["CoqExn", TAIL],
-                           lambda rest:
-                           raise_(CoqExn("\n".join(searchStrsInMsg(rest)))),
-                           ["Added", int, TAIL],
-                           lambda state_num, tail: state_num),
-                     _, lambda x: raise_(BadResponse(msg))), feedbacks
+        return state_num, feedbacks
 
     def _discard_feedback(self) -> None:
         try:
@@ -1459,13 +1522,8 @@ def isBreakAnswer(msg: 'Sexp') -> bool:
 
 
 @contextlib.contextmanager
-def SerapiContext(coq_commands: List[str], module_name: Optional[str],
-                  prelude: str, use_hammer: bool = False,
-                  log_outgoing_messages: Optional[str] = None) \
-                  -> Iterator[Any]:
-    coq = SerapiInstance(coq_commands, module_name, prelude,
-                         use_hammer=use_hammer,
-                         log_outgoing_messages=log_outgoing_messages)
+def SerapiContext(*args, **kwargs):
+    coq = SerapiInstance(*args, **kwargs)
     try:
         yield coq
     finally:
@@ -2175,6 +2233,160 @@ def admit_proof(coq: SerapiInstance,
     for cmd in admit_cmds:
         coq.run_stmt(cmd)
     return admit_cmds
+
+
+def get_theorems(coq_commands):
+    """
+    Given coq commands extract list of theorems with their proofs.
+    """
+    theorems = []
+    in_proof = False
+    proof = []
+    for cmd in reversed(coq_commands):
+        if ending_proof(cmd):
+            in_proof = True
+            proof = [cmd]
+        elif possibly_starting_proof(cmd) and in_proof:
+            theorems.append(
+                {
+                    'statement': cmd,
+                    'proof': proof[::-1]
+                }
+            )
+            in_proof = False
+            proof = []
+        elif in_proof:
+            proof.append(cmd)
+
+    return theorems
+
+
+def _is_parentheses_correct(line):
+
+    # 1. check for parentheses structure
+    square = 0
+    round = 0
+    for char in line:
+        if char == '(':
+            round += 1
+        elif char == ')':
+            round -= 1
+        elif char == '[':
+            square += 1
+        elif char == ']':
+            square -= 1
+
+        if round < 0 or square < 0:
+            return False
+    return square == 0 and round == 0
+
+
+def _is_match_goal_correct(line):
+    # TODO: make this function to find nested "match goal" structures
+
+    # 2. check `match goal with ... end` structure
+    match = re.match('.*match\s+goal\s+with', line, re.DOTALL)
+    if match is not None:
+        match = re.match('.*match\s+goal\s+with(.*)end', line, re.DOTALL)
+        if match is None:
+            return False
+    return True
+
+
+def _replace_bullet_tactic(tactic):
+    if tactic == 'left':
+        return 'constructor 1'
+    elif tactic == 'right':
+        return 'constructor 2'
+    return tactic
+
+
+def _split_square_brackets(tactic):
+    # check whether tactic contains nested `[ ... ]` structure
+    # in this case return tactic as is.
+    tactic_split = re.split(r"\|(?!.*[\]])", tactic[1:-2])
+    tactic_split = [t.strip() + '.' if t else 'idtac.' for t in tactic_split]
+
+    return tactic_split
+
+
+def linearize_commands(coq, commands):
+    in_proof = False
+    linear_commands = []
+    for cmd in commands:
+        if in_proof:
+            cmd = cmd.strip()
+
+            # Remove bullets
+            match = re.match(r'([-]+(?![-*+]+))|([+]+(?![+*-]+))|([*]+(?![*-+]+))', cmd)
+            if match:
+                cmd = cmd[match.span()[1]:]
+
+            if not cmd:
+                continue
+
+            # split by semicolon but not inside parentheses
+            terms = cmd.split(';')
+            assert terms[-1][-1] == '.'
+            terms[-1] = terms[-1][:-1]
+            i = 0
+            while i < len(terms):
+                terms[i] = terms[i].strip()
+                if not _is_parentheses_correct(terms[i]) or not _is_match_goal_correct(terms[i]):
+                    terms[i] = f"{terms[i]}; {terms[i + 1].strip()}"
+                    del terms[i + 1]
+                else:
+                    i += 1
+
+            # run first tactic
+            n_goals = len(coq.proof_context.fg_goals)
+            coq.run_stmt(terms[0] + '.')
+            n_tactics_to_apply = 0
+            if coq.proof_context is not None:
+                n_tactics_to_apply = len(coq.proof_context.fg_goals) - n_goals + 1
+
+            for i, tactic in enumerate(terms[1:]):
+                tactic = _replace_bullet_tactic(tactic) + '.'
+                goal_idx = 1
+
+                if not tactic.startswith('['):
+                    tactics_to_apply = [tactic] * n_tactics_to_apply
+                else:
+                    tactics_to_apply = _split_square_brackets(tactic)
+                    if len(tactics_to_apply) == 1:
+                        goal_idx = 'all'
+
+                for tac in tactics_to_apply:
+                    n_goals_before = len(coq.proof_context.fg_goals)
+
+                    coq.run_stmt(f"{goal_idx}: {tac}")
+                    linear_commands.append(f"{goal_idx}: {tac}")
+
+                    n_goals_after = len(coq.proof_context.fg_goals)
+                    n_new_goals = n_goals_after - n_goals_before
+
+                    # 3 possibilities:
+                    # 1. number of goals didn't change -> goal_idx += 1
+                    # 2. Number of goals decreased by 1 -> pass
+                    # 3. Number of goals increased by k -> goals_idx += k - 1
+                    if n_new_goals == 0:
+                        goal_idx += 1
+                    elif n_new_goals > 0:
+                        goal_idx += n_new_goals + 1
+
+                n_tactics_to_apply = 0
+                if coq.proof_context is not None:
+                    n_tactics_to_apply = len(coq.proof_context.fg_goals) - n_goals + 1
+        else:
+            coq.run_stmt(cmd)
+            linear_commands.append(cmd)
+
+        if not in_proof and coq.proof_context:
+            in_proof = True
+        elif coq.proof_context is None:
+            in_proof = False
+
+    return linear_commands
 
 
 def main() -> None:

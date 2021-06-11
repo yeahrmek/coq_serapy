@@ -32,6 +32,9 @@ class AbstractSyntaxTree(object):
     def __repr__(self):
         return self.str
 
+    def __eq__(self, other):
+        return self.ast == other.ast
+
 
 class Obligation(NamedTuple):
     hypotheses: List[AbstractSyntaxTree]
