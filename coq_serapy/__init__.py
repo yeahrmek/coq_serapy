@@ -946,7 +946,12 @@ class SerapiInstance(threading.Thread):
         self._states.pop()
 
         # Get the response from cancelling
-        self._get_cancelled()
+        try:
+            self._get_cancelled()
+        except Exception as ex:
+            import pdb
+            pdb.set_trace()
+            print(ex)
 
         # Get a new proof context, if it exists
         self._get_proof_context()
