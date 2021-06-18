@@ -253,76 +253,32 @@ class SerapiInstance(threading.Thread):
                  prelude: str,
                  timeout: int = 30, use_hammer: bool = False,
                  log_outgoing_messages: Optional[str] = None, quiet=False) -> None:
-        try:
-            with open(prelude + "/_CoqProject", 'r') as includesfile:
-                includes = includesfile.read()
-        except FileNotFoundError:
-            includes = ""
-        # Set up some threading stuff. I'm not totally sure what
-        # daemon=True does, but I think I wanted it at one time or
-        # other.
-        self.__zombie = False
-        threading.Thread.__init__(self, daemon=True)
-        # Open a process to coq, with streams for communicating with
-        # it.
-        self._proc = subprocess.Popen(coq_command,
-                                      cwd=prelude,
-                                      stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE)
-        self._fout = self._proc.stdout
-        self._fin = self._proc.stdin
         self.timeout = timeout
-        self.log_outgoing_messages = log_outgoing_messages
-
-        # Initialize some state that we'll use to keep track of the
-        # coq state. This way we don't have to do expensive queries to
-        # the other process to answer simple questions.
-        self.proof_context = None  # type: Optional[ProofContext]
-        self._states = [0]
-        self.tactic_history = TacticHistory()
-        self._local_lemmas: List[Tuple[AbstractSyntaxTree, bool]] = []
-
-        # Set up the message queue, which we'll populate with the
-        # messages from serapi.
-        self.message_queue = queue.Queue()  # type: queue.Queue[str]
-        # Verbosity is zero until set otherwise
-        self.verbose = 0
-        # Set the "extra quiet" flag (don't print on failures) to false
-        self.quiet = quiet
-        # The messages printed to the *response* buffer by the command
-        self.feedbacks: List[Any] = []
-        # Start the message queue thread
-        self.start()
-        # Go through the messages and throw away the initial feedback.
-        self._discard_feedback()
-        # Stacks for keeping track of the current lemma and module
-        self.sm_stack: List[Tuple[str, bool]] = []
-
-        # Open the top level module
-        if module_name and module_name not in ["Parameter", "Prop", "Type"]:
-            self.run_stmt(f"Module {module_name}.")
-        # Execute the commands corresponding to include flags we were
-        # passed
-        self._exec_includes(includes, prelude)
-        # Unset Printing Notations (to get more learnable goals?)
-        self._unset_printing_notations()
-
-        self._local_lemmas_cache: Optional[List[AbstractSyntaxTree]] = None
-        self._module_changed = True
-
-        # Set up CoqHammer
         self.use_hammer = use_hammer
-        if self.use_hammer:
-            try:
-                self.init_hammer()
-            except TimeoutError:
-                eprint("Failed to initialize hammer!")
-                raise
+        self.quiet = quiet
+
+        self._coq_command = coq_command
+        self._module_name = module_name
+        self._prelude = prelude
+        self._log_outgoing_messages = log_outgoing_messages
+
+        self._stmt_cache = []
+
+        self.restart()
+
+    @classmethod
+    def from_instance(cls, instance):
+        coq = cls(instance._coq_command, instance._module_name, instance._prelude,
+                  instance.timeout, instance.use_hammer, instance.log_outgoing_messages,
+                  instance.quiet)
+        for stm in instance._stmt_cache:
+            coq.run_stmt(stm, cache_stmt=True)
+        return coq
 
     @property
     def last_state_id(self):
-        return self._states[-1]
+        # return self._states[-1]
+        return self.cur_state
 
     @property
     def module_stack(self) -> List[str]:
@@ -594,13 +550,15 @@ class SerapiInstance(threading.Thread):
     # instance. Returns nothing: if you want a response, call one of
     # the other methods to get it.
     def run_stmt(self, stmt: str, timeout: Optional[int] = None,
-                 return_ast: Optional[bool] = False):
+                 return_ast: Optional[bool] = False, cache_stmt=False):
         if timeout:
             old_timeout = self.timeout
             self.timeout = timeout
         self._flush_queue()
         eprint("Running statement: " + stmt.lstrip('\n'),
                guard=self.verbose >= 2)  # lstrip makes output shorter
+        if cache_stmt:
+            self._stmt_cache.append(stmt)
         # We need to escape some stuff so that it doesn't get stripped
         # too early.
         stmt = stmt.replace("\\", "\\\\")
@@ -902,18 +860,14 @@ class SerapiInstance(threading.Thread):
     # serapi. Even if the command failed after parsing, this will
     # still cancel it. You need to call this after a command that
     # fails after parsing, but not if it fails before.
-    def cancel_last(self):
-        self.cancel_last_state_id()
-
-    def cancel_last_state_id(self) -> None:
+    def cancel_last(self, restart_on_timeout=False) -> None:
         context_before = self.proof_context
         if self.proof_context:
             if len(self.tactic_history.getFullHistory()) > 0:
                 cancelled = self.tactic_history.getNextCancelled()
                 eprint(f"Cancelling {cancelled} "
-                       f"from state {self.last_state_id}",
+                       f"from state {self.cur_state}",
                        guard=self.verbose >= 2)
-
                 self._cancel_potential_local_lemmas(cancelled)
             else:
                 eprint("Cancelling something (not in history)",
@@ -921,7 +875,7 @@ class SerapiInstance(threading.Thread):
         else:
             cancelled = ""
             eprint(f"Cancelling vernac "
-                   f"from state {self.last_state_id}",
+                   f"from state {self.cur_state}",
                    guard=self.verbose >= 2)
         self.__cancel()
 
@@ -937,22 +891,88 @@ class SerapiInstance(threading.Thread):
             eprint(f"History is now {self.tactic_history.getFullHistory()}")
             summarizeContext(self.proof_context)
 
+    def restart(self):
+        do_cache = True
+        if hasattr(self, '_proc'):
+            self.kill()
+            do_cache = False
+
+        try:
+            with open(self._prelude + "/_CoqProject", 'r') as includesfile:
+                includes = includesfile.read()
+        except FileNotFoundError:
+            includes = ""
+        # Set up some threading stuff. I'm not totally sure what
+        # daemon=True does, but I think I wanted it at one time or
+        # other.
+        self.__zombie = False
+        threading.Thread.__init__(self, daemon=True)
+        # Open a process to coq, with streams for communicating with
+        # it.
+        self._proc = subprocess.Popen(self._coq_command,
+                                      cwd=self._prelude,
+                                      stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+        self._fout = self._proc.stdout
+        self._fin = self._proc.stdin
+        self.log_outgoing_messages = self._log_outgoing_messages
+        self.module_path = Path(self._prelude) / self._module_name
+
+        self.last_executed_line_no = -1
+
+        # Initialize some state that we'll use to keep track of the
+        # coq state. This way we don't have to do expensive queries to
+        # the other process to answer simple questions.
+        self.proof_context = None  # type: Optional[ProofContext]
+        self.cur_state = 0
+        self.tactic_history = TacticHistory()
+        self._local_lemmas: List[Tuple[AbstractSyntaxTree, bool]] = []
+
+        # Set up the message queue, which we'll populate with the
+        # messages from serapi.
+        self.message_queue = queue.Queue()  # type: queue.Queue[str]
+        # Verbosity is zero until set otherwise
+        self.verbose = 0
+        # The messages printed to the *response* buffer by the command
+        self.feedbacks: List[Any] = []
+        # Start the message queue thread
+        self.start()
+        # Go through the messages and throw away the initial feedback.
+        self._discard_feedback()
+        # Stacks for keeping track of the current lemma and module
+        self.sm_stack: List[Tuple[str, bool]] = []
+
+        # Open the top level module
+        if self._module_name and self._module_name not in ["Parameter", "Prop", "Type"]:
+            self.run_stmt(f"Module {self._module_name}.", cache_stmt=do_cache)
+        # Execute the commands corresponding to include flags we were
+        # passed
+        self._exec_includes(includes, self._prelude)
+        # Unset Printing Notations (to get more learnable goals?)
+        self._unset_printing_notations()
+
+        self._local_lemmas_cache: Optional[List[AbstractSyntaxTree]] = None
+        self._module_changed = True
+
+        # Set up CoqHammer
+        if self.use_hammer:
+            try:
+                self.init_hammer()
+            except TimeoutError:
+                eprint("Failed to initialize hammer!")
+                raise
+
+        for stm in self._stmt_cache:
+            self.run_stmt(stm)
+
     def __cancel(self) -> None:
         self._flush_queue()
         assert self.message_queue.empty(), self.messages
-
         # Run the cancel
-        self._send_acked("(Cancel ({}))".format(self.last_state_id))
-        self._states.pop()
-
+        self._send_acked("(Cancel ({}))".format(self.cur_state))
         # Get the response from cancelling
-        try:
-            self._get_cancelled()
-        except Exception as ex:
-            import pdb
-            pdb.set_trace()
-            print(ex)
-
+        self.cur_state = self._get_cancelled()
         # Get a new proof context, if it exists
         self._get_proof_context()
 
@@ -1079,9 +1099,10 @@ class SerapiInstance(threading.Thread):
             self.add_ocaml_lib("./" + imatch.group(1))
 
     def _update_state(self) -> None:
-        new_state, self.feedbacks = self._get_next_state()
-        if new_state is not None:
-            self._states.append(new_state)
+        # new_state, self.feedbacks = self._get_next_state()
+        # if new_state is not None:
+        #     self._states.append(new_state)
+        self.cur_state, self.feedbacks = self._get_next_state()
 
     def _unset_printing_notations(self) -> None:
         self._send_acked("(Add () \"Unset Printing Notations.\")\n")
@@ -1114,7 +1135,7 @@ class SerapiInstance(threading.Thread):
         except TimeoutError:
             pass
         except CoqAnomaly as e:
-            if e.msg != "Timing Out":
+            if e.msg != "Timing out":
                 raise
 
     def _discard_initial_feedback(self) -> None:
@@ -1170,7 +1191,7 @@ class SerapiInstance(threading.Thread):
                     interrupt_response = \
                         loads(self.message_queue.get(timeout=self.timeout))
                 except queue.Empty:
-                    raise CoqAnomaly("Timing Out")
+                    raise CoqAnomaly("Timing out")
 
             got_answer_after_interrupt = match(
                 normalizeMessage(interrupt_response),
@@ -1471,6 +1492,15 @@ class SerapiInstance(threading.Thread):
         self.__zombie = True
         threading.Thread.join(self)
     pass
+
+
+def restart(coq):
+    stmt_cache = coq._stmt_cache
+    args = coq
+    del coq
+    coq = SerapiInstance(
+
+    )
 
 
 goal_regex = re.compile(r"\(\(info\s*\(\(evar\s*\(Ser_Evar\s*(\d+)\)\)"
