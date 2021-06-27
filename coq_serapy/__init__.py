@@ -263,6 +263,7 @@ class SerapiInstance(threading.Thread):
         self._log_outgoing_messages = log_outgoing_messages
 
         self._stmt_cache = []
+        self._checkpoints = []
 
         self.restart()
 
@@ -303,6 +304,18 @@ class SerapiInstance(threading.Thread):
             self._local_lemmas_cache = list(generate())
             self._module_changed = False
         return self._local_lemmas_cache
+
+    def create_checkpoint(self):
+        self._checkpoints.append(self.last_state_id)
+
+    def restore_last_checkpoint(self):
+        if not self._checkpoints:
+            return
+
+        checkpoint_id = self._checkpoints.pop()
+        while self.last_state_id > checkpoint_id:
+            self.cancel_last()
+
 
     def _cancel_potential_local_lemmas(self, cmd: AbstractSyntaxTree) -> None:
         if isinstance(cmd, AbstractSyntaxTree):
