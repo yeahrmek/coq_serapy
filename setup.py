@@ -6,6 +6,6 @@ setuptools.setup(
     author="",
     description="Python interface for interacting with coq-serapi",
     packages=["coq_serapy"],
-    python_requires=">=3.8",
+    python_requires=">=3.6",
     requires=["pampy", "sexpdata", "tqdm"]
 )
