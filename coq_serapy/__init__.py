@@ -253,15 +253,12 @@ class SerapiInstance(threading.Thread):
     # This takes three parameters: a string to use to run serapi, a
     # list of coq includes which the files we're running on will
     # expect, and a base directory
-    def __init__(self, coq_command: List[str], module_name: Optional[str],
-                 prelude: str,
+    def __init__(self, coq_command: List[str], module_path,
+                 project_path: str,
                  timeout: int = 30, use_hammer: bool = False,
-                 log_outgoing_messages: Optional[str] = None, verbose=0) -> None:
-        try:
-            with open(prelude + "/_CoqProject", 'r') as includesfile:
-                includes = includesfile.read()
-        except FileNotFoundError:
-            includes = ""
+                 log_outgoing_messages: Optional[str] = None, verbose=0, quiet=True) -> None:
+        module_path = Path(str(module_path))
+        project_path = Path(project_path)
         # Set up some threading stuff. I'm not totally sure what
         # daemon=True does, but I think I wanted it at one time or
         # other.
@@ -270,7 +267,7 @@ class SerapiInstance(threading.Thread):
         # Open a process to coq, with streams for communicating with
         # it.
         self._proc = subprocess.Popen(coq_command,
-                                      cwd=prelude,
+                                      cwd=str(project_path),
                                       stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE)
@@ -293,7 +290,7 @@ class SerapiInstance(threading.Thread):
         # Verbosity is zero until set otherwise
         self.verbose = verbose
         # Set the "extra quiet" flag (don't print on failures) to false
-        self.quiet = False
+        self.quiet = quiet
         # The messages printed to the *response* buffer by the command
         self.feedbacks: List[Any] = []
         # Start the message queue thread
@@ -304,11 +301,20 @@ class SerapiInstance(threading.Thread):
         self.sm_stack: List[Tuple[str, bool]] = []
 
         # Open the top level module
-        if module_name and module_name not in ["Parameter", "Prop", "Type"]:
-            self.run_stmt(f"Module {module_name}.")
+        if module_path and module_path.stem not in ["Parameter", "Prop", "Type"]:
+            self.run_stmt(f"Module {module_path.stem}.")
         # Execute the commands corresponding to include flags we were
         # passed
-        self._exec_includes(includes, prelude)
+        
+        prelude = module_path
+        while prelude != project_path:
+            prelude = prelude.parent
+            if (prelude / '_CoqProject').is_file():
+                with open(prelude / "_CoqProject", 'r') as includesfile:
+                    includes = includesfile.read()
+                self._exec_includes(includes, str(prelude))
+
+
         # Unset Printing Notations (to get more learnable goals?)
         self._unset_printing_notations()
 
@@ -335,7 +341,7 @@ class SerapiInstance(threading.Thread):
         self._states.append([])
 
     def restore_last_checkpoint(self):
-        for s in self._states[-1]:
+        for _ in self._states[-1].copy():
             self.cancel_last()
         self._states.pop()
 
@@ -930,7 +936,6 @@ class SerapiInstance(threading.Thread):
 
         # Run the cancel
         cancel_state = self.cur_state
-        print("Cancelling state", cancel_state)
         self._send_acked("(Cancel ({}))".format(self.cur_state))
         # Get the response from cancelling
 
@@ -938,7 +943,6 @@ class SerapiInstance(threading.Thread):
         if cancel_state in self._states[-1]:
             self._states[-1].remove(cancel_state)
         self._get_cancelled()
-
 
         # Get a new proof context, if it exists
         self._get_proof_context()
@@ -964,8 +968,11 @@ class SerapiInstance(threading.Thread):
               _, lambda msg: raise_(CompletedError(completed)))
 
     def add_lib(self, origpath: str, logicalpath: str) -> None:
-        addStm = ("(Add () \"Add LoadPath \\\"{}\\\" as {}.\")\n"
-                  .format(origpath, logicalpath))
+        if logicalpath != '""':
+            addStm = ("(Add () \"Add LoadPath \\\"{}\\\" as {}.\")\n"
+                    .format(origpath, logicalpath))
+        else:
+            addStm = f'(Add () "Add LoadPath \\\"{origpath}\\\".")\n'
         self._send_acked(addStm)
         self._update_state()
         self._get_completed()
@@ -1457,13 +1464,9 @@ def isBreakAnswer(msg: 'Sexp') -> bool:
 
 
 @contextlib.contextmanager
-def SerapiContext(coq_commands: List[str], module_name: Optional[str],
-                  prelude: str, use_hammer: bool = False,
-                  log_outgoing_messages: Optional[str] = None) \
+def SerapiContext(*args, **kwargs) \
                   -> Iterator[Any]:
-    coq = SerapiInstance(coq_commands, module_name, prelude,
-                         use_hammer=use_hammer,
-                         log_outgoing_messages=log_outgoing_messages)
+    coq = SerapiInstance(*args, **kwargs)
     try:
         yield coq
     finally:
@@ -1504,6 +1507,23 @@ def possibly_starting_proof(command: str) -> bool:
     pattern = r"(?:(?:Local|Global)\s+)?(" + "|".join(lemma_starting_patterns) + r")\s*"
     return bool(re.match(pattern,
                          stripped_command))
+
+
+def is_proof_start(coq_commands, start_idx):
+    if not possibly_starting_proof(coq_commands[start_idx]):
+        return False
+
+    # 1. find proof end,
+    # 2. If in lines between start_idx and proof_end_idx there is another
+    #    possibly starting proof, then the initial possibly starting proof
+    #    is not a starting proof.
+    i = start_idx + 1
+    while i < len(coq_commands) and not ending_proof(coq_commands[i]):
+        if possibly_starting_proof(coq_commands[i]):
+            return False
+        i += 1
+
+    return True
 
 
 def ending_proof(command: str) -> bool:
@@ -1938,18 +1958,21 @@ def load_commands_preserve(args: argparse.Namespace, file_idx: int,
 
 
 def load_commands(filename: str,
+                  skip_comments: bool = True,
                   max_commands: Optional[int] = None,
                   progress_bar: bool = False,
                   progress_bar_offset: Optional[int] = None) -> List[str]:
     with open(filename, 'r') as fin:
         contents = fin.read()
     return read_commands(contents,
+                         skip_comments=skip_comments,
                          max_commands=max_commands,
                          progress_bar=progress_bar,
                          progress_bar_offset=progress_bar_offset)
 
 
 def read_commands(contents: str,
+                  skip_comments: bool = True,
                   max_commands: Optional[int] = None,
                   progress_bar: bool = False,
                   progress_bar_offset: Optional[int] = None) -> List[str]:
@@ -2016,6 +2039,9 @@ def read_commands(contents: str,
                     result.append(cur_command)
                     cur_command = ""
             curPos = nextPos
+
+    if skip_comments:
+        result = [kill_comments(cmd).strip() for cmd in result]
     return result
 
 
@@ -2147,6 +2173,276 @@ def admit_proof(coq: SerapiInstance,
     for cmd in admit_cmds:
         coq.run_stmt(cmd)
     return admit_cmds
+
+
+def _is_parentheses_correct(line):
+
+    # 1. check for parentheses structure
+    square = 0
+    round = 0
+    for char in line:
+        if char == '(':
+            round += 1
+        elif char == ')':
+            round -= 1
+        elif char == '[':
+            square += 1
+        elif char == ']':
+            square -= 1
+
+        if round < 0 or square < 0:
+            return False
+    return square == 0 and round == 0
+
+
+def _is_match_goal_correct(line):
+    # TODO: make this function to find nested "match goal" structures
+
+    # 2. check `match goal with ... end` structure
+    match = re.match('.*match\s+goal\s+with', line, re.DOTALL)
+    if match is not None:
+        match = re.match('.*match\s+goal\s+with(.*)end', line, re.DOTALL)
+        if match is None:
+            return False
+    return True
+
+
+def _replace_bullet_tactic(tactic):
+    if tactic == 'left':
+        return 'constructor 1'
+    elif tactic == 'right':
+        return 'constructor 2'
+    return tactic
+
+
+def _split_square_brackets(tactic):
+    # check whether tactic contains nested `[ ... ]` structure
+    # in this case return tactic as is.
+    tactic_split = re.split(r"\|(?!.*[\]])", tactic[1:-2])
+    tactic_split = [t.strip() + '.' if t else 'idtac.' for t in tactic_split]
+
+    return tactic_split
+
+
+# def tactical_first(coq, tactic, goal_idx):
+#     """
+#     Linearize tactical `first`.
+#     It applies the tactic to each goal consequently and ignores failed tactics
+
+#     """
+#     tactic = f"{goal_idx}: {' '.join(tactic.split(' ')[1:])}"
+#     try:
+#         coq.run_stmt(tactic)
+#     except SerapiException as e:
+#         return None
+#     return tactic
+
+
+def split_goal_idx_tactic(tactic_str):
+    """
+    Split the tactic string:
+        if the string startswith <n>: <tactic>, then the function returns [<n>, <tactic>],
+        else it returns [tactic_str]
+    Args:
+        tactic_str: str
+
+    Returns:
+        list[str]
+    """
+    goal_idx_match = re.match(r"all\s*:", tactic_str)
+    if goal_idx_match:
+        return 'all', re.split(r"all\s*:\s*", tactic_str)[-1]
+
+    goal_idx_match = re.match(r"(\d+)\s*:", tactic_str)
+    if not goal_idx_match:
+        return [None, tactic_str]
+    else:
+        goal_idx = int(goal_idx_match.group(1)) - 1
+        return goal_idx, re.split(r"\d+\s*:\s*", tactic_str)[-1]
+
+
+def linearize_commands(project_path, module_path, remove_bullets=True, timeout=10):
+    commands = load_commands(module_path, skip_comments=True)
+
+    coq = SerapiInstance(['sertop', '--implicit', '--omit_loc'], module_path,
+                         project_path, timeout=timeout)
+
+    in_proof = False
+    linear_commands = []
+    prev_cmd = ''
+    for cmd in commands:
+
+        # Check parenthesis structure.
+        if prev_cmd:
+            cmd = prev_cmd + cmd
+            prev_cmd = ''        
+
+        if not _is_parentheses_correct(cmd):
+            prev_cmd = cmd
+            continue
+
+        if in_proof:
+            cmd = cmd.strip()
+
+            # # Remove bullets
+            # if remove_bullets:
+            #     match = re.match(r'([-]+(?![-*+]+))|([+]+(?![+*-]+))|([*]+(?![*-+]+))', cmd)
+            #     if match:
+            #         cmd = cmd[match.span()[1]:]
+
+            #     if open_curly_bracket and cmd.endswith('}'):
+            #         open_curly_bracket = False
+            #         coq.run_stmt(cmd)
+            #         linear_commands.append(cmd)
+            #         continue
+            #     else:
+            #         # remove curly braces
+            #         if cmd.startswith('{') or cmd.startswith('}'):
+            #             cmd = cmd[1:].strip()
+            #         if cmd.endswith('}'):
+            #             cmd = cmd[:-1].strip()
+            #         elif cmd.endswith('{'):
+            #             open_curly_bracket = True
+            #             coq.run_stmt(cmd)
+            #             linear_commands.append(cmd)
+            #             continue
+            # elif cmd[-1] in ['-', '+', '*']:
+            #     print(cmd)
+            #     coq.run_stmt(cmd)
+            #     linear_commands.append(cmd)
+            #     continue
+
+            if (cmd[-1] in ['+', '-', '*', '{', '}'] or
+                'Ltac' in cmd or
+                'cycle ' in cmd or
+                cmd.endswith('...') or
+                cmd.startswith('Proof') or 
+                'try now rewrite get_set_diff in *;' in cmd  # this is ugly, but I don't know how to parse this correctly
+            ):
+                print(cmd)
+                coq.run_stmt(cmd)
+                linear_commands.append(cmd)
+            elif cmd:
+
+                # split by semicolon but not inside parentheses
+                terms = cmd.split(';')
+                terms[-1] = terms[-1][:-1] if terms[-1][-1] == '.' else terms[-1]  # remove dot from the last term
+                i = 0
+                while i < len(terms):
+                    terms[i] = terms[i].strip()
+                    if not _is_parentheses_correct(terms[i]) or not _is_match_goal_correct(terms[i]):
+                        terms[i] = f"{terms[i]}; {terms[i + 1].strip()}"
+                        del terms[i + 1]
+                    else:
+                        i += 1
+
+                # run first tactic
+                n_goals = len(coq.proof_context.fg_goals)
+
+                first_tac = ''
+                coq.create_checkpoint()
+
+                for i, term in enumerate(terms.copy()):
+                    next_tac = _replace_bullet_tactic(term) + '.'
+                    first_tac = next_tac if not first_tac else f"{first_tac[:-1]}; {next_tac}"
+                    first_tac_goal_idx, _ = split_goal_idx_tactic(first_tac)
+
+                    try:
+                        coq.run_stmt(first_tac)
+                        break
+                    except SerapiException as e:
+                        terms = terms[1:]
+
+                tactics_to_append = [first_tac]
+
+                n_tactics_to_apply = 0
+                if coq.proof_context is not None:
+                    if isinstance(first_tac_goal_idx, str) and first_tac_goal_idx == 'all':
+                        n_tactics_to_apply = len(coq.proof_context.fg_goals)
+                    else:
+                        n_tactics_to_apply = len(coq.proof_context.fg_goals) - n_goals + 1
+
+                # run other tactic taking into account ";" and "[ ... | ... ]" syntax
+                prev_tactic = ''
+                for i, tactic in enumerate(terms[1:]):
+                    tactic = _replace_bullet_tactic(tactic) + '.'
+                    tactic = f"{prev_tactic[:-1]}; {tactic}" if prev_tactic else tactic
+
+                    if first_tac_goal_idx is not None:
+                        goal_idx = first_tac_goal_idx
+                    else:
+                        goal_idx, tactic = split_goal_idx_tactic(tactic)
+                    
+                    if isinstance(goal_idx, int):
+                        goal_idx += 1
+                    elif goal_idx is None or goal_idx == 'all':
+                        goal_idx = 1
+                    
+                    goal_idx_backup = goal_idx
+
+                    if not tactic.startswith('['):
+                        tactics_to_apply = [tactic] * n_tactics_to_apply
+                    else:
+                        tactics_to_apply = _split_square_brackets(tactic)
+                        if len(tactics_to_apply) == 1:
+                            goal_idx = 'all'
+
+                    try:
+                        current_tactics = []
+                        for tac in tactics_to_apply:
+                            n_goals_before = len(coq.proof_context.fg_goals)
+
+                            coq.run_stmt(f"{goal_idx}: {tac}")
+                            current_tactics.append(f"{goal_idx}: {tac}")
+
+                            n_goals_after = len(coq.proof_context.fg_goals)
+                            n_new_goals = n_goals_after - n_goals_before
+
+                            # 3 possibilities:
+                            # 1. number of goals didn't change -> goal_idx += 1
+                            # 2. Number of goals decreased by 1 -> pass
+                            # 3. Number of goals increased by k -> goals_idx += k - 1
+                            if isinstance(goal_idx, str) and goal_idx == 'all':
+                                goal_idx = goal_idx_backup
+                            if n_new_goals == 0:
+                                goal_idx += 1
+                            elif n_new_goals > 0:
+                                goal_idx += n_new_goals + 1
+
+                        n_tactics_to_apply = 0
+                        if isinstance(first_tac_goal_idx, str) and first_tac_goal_idx == 'all':
+                            n_tactics_to_apply = len(coq.proof_context.fg_goals)
+                        elif coq.proof_context is not None:
+                            n_tactics_to_apply = len(coq.proof_context.fg_goals) - n_goals + 1
+
+                        prev_tactic = ''
+                        tactics_to_append.extend(current_tactics)
+                    except SerapiException as e:
+                        prev_tactic = tactic
+
+                # if application of the last terms is unsuccessfull just accept cmd as is
+                if prev_tactic:
+                    coq.restore_last_checkpoint()
+                    print(cmd)
+                    coq.run_stmt(cmd)
+                    linear_commands.append(cmd)
+                else:
+                    states = coq._states.pop()
+                    coq._states[-1].extend(states)
+                    linear_commands.extend(tactics_to_append)
+                    print(tactics_to_append)
+        else:
+            print(cmd)
+            coq.run_stmt(cmd)
+            linear_commands.append(cmd)
+
+        if not in_proof and coq.proof_context:
+            in_proof = True
+        elif coq.proof_context is None:
+            in_proof = False
+
+    coq.kill()
+    return linear_commands
 
 
 def main() -> None:
