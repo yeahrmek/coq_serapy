@@ -895,6 +895,113 @@ class SerapiInstance(threading.Thread):
                      [[], [_]],
                      lambda inner_sexp: self._parseSexpGoal(inner_sexp))
 
+    def query_qualid(self, qualid):
+        msg = loads(self._ask_text(f'(Query () (Locate "{qualid}"))'))[2][1]
+        if msg == [] and qualid.startswith("SerTop."):
+            qualid = qualid[len("SerTop.") :]
+            msg = loads(self._ask_text(f'(Query () (Locate "{qualid}"))'))[2][1]
+
+        assert len(msg) == 1
+        short_responses = msg[0][1][0][1]
+        assert str(short_responses[1][0]) == "DirPath"
+        short_ident = ".".join(
+            [str(x[1]) for x in short_responses[1][1][::-1]]
+            + [str(short_responses[2][1])]
+        )
+        return short_ident
+
+
+    def query_env(self, module_path):
+        msg = self._ask_text("(Query () Env)")
+        env = loads(msg, true='True_')[2][1][0]
+        # store the constants
+        constants = []
+        for const in env[1][0][1][0][1]:
+            # identifier
+            qualid = f"{print_mod_path(const[0][1])}.{const[0][2][1]}"
+
+            if qualid.startswith('SerTop.'):
+                physical_path = str(module_path)
+            else:
+                physical_path = None  # should be implemented using (Query () LocateLibrary)
+
+            short_ident = self.query_qualid(qualid)
+
+            # term
+            assert str(const[1][0][1][0]) == "const_body"
+            if str(const[1][0][1][1][0]) == "Undef":  # delaration
+                opaque = None
+                term = None
+            elif str(const[1][0][1][1][0]) == "Def":  # transparent definition
+                opaque = False
+                term = None
+            else:
+                assert str(const[1][0][1][1][0]) == "OpaqueDef"  # opaque definition
+                opaque = True
+                term = None
+
+            # type
+            assert str(const[1][0][2][0]) == "const_type"
+            type_sexp = dumps(const[1][0][2][1])
+            type_ = self._sexpStrToTermStr(type_sexp)
+            # sort = coq._ask_text(f"(Query () (Type {type_sexp}))")
+            constants.append(
+                {
+                    "physical_path": physical_path,
+                    "short_ident": short_ident,  # short identifier
+                    "qualid": qualid,            # long identifier
+                    "term": term,                #
+                    "type": type_,               # type of the constant
+                    # "sort": sort,                # type of the type
+                    "opaque": opaque,            # whether constant is opaque or transparent
+                    "sexp": dumps(const[1][0][2][1]),
+                }
+            )
+
+        # store the inductives
+        inductives = []
+        for induct in env[1][0][1][1][1]:
+            # identifier
+            qualid = f"{print_mod_path(induct[0][1])}.{induct[0][2][1]}"
+
+            short_ident = self.query_qualid(qualid)
+            if qualid.startswith("SerTop."):
+            #     logical_path = "SerTop"
+                physical_path = str(module_path)
+            else:
+                logical_path = mod_path_file(induct[0][1])
+                # physical_path = os.path.relpath(self.query_library(logical_path))
+                physical_path = None
+            # physical_path += ":" + qualid[len(logical_path) + 1 :]
+
+            blocks = []
+            for blk in induct[1][0][0][1]:
+                blk_qualid = ".".join(qualid.split(".")[:-1] + [str(blk[0][1][1])])
+                blk_short_ident = self.query_qualid(blk_qualid)
+                # constructors
+                constructors = []
+                for c_name, c_type in zip(blk[3][1], blk[4][1]):
+                    c_name = str(c_name[1])
+                    c_type = self._sexpStrToTermStr(dumps(c_type))
+                    constructors.append((c_name, c_type))
+                blocks.append(
+                    {
+                        "short_ident": blk_short_ident,
+                        "qualid": blk_qualid,
+                        "constructors": constructors,
+                    }
+                )
+                
+            inductives.append(
+                {
+                    "physical_path": physical_path,
+                    "blocks": blocks,
+                    "is_record": str(induct[1][0][1][1]) != "NotRecord",
+                    "sexp": dumps(induct),
+                }
+            )
+        return constants, inductives
+
     # Cancel the last command which was sucessfully parsed by
     # serapi. Even if the command failed after parsing, this will
     # still cancel it. You need to call this after a command that
@@ -2261,7 +2368,7 @@ def split_goal_idx_tactic(tactic_str):
         return goal_idx, re.split(r"\d+\s*:\s*", tactic_str)[-1]
 
 
-def linearize_commands(project_path, module_path, remove_bullets=True, timeout=10):
+def linearize_commands(project_path, module_path, remove_bullets=False, timeout=10):
     commands = load_commands(module_path, skip_comments=True)
 
     coq = SerapiInstance(['sertop', '--implicit', '--omit_loc'], module_path,
@@ -2319,7 +2426,6 @@ def linearize_commands(project_path, module_path, remove_bullets=True, timeout=1
                 cmd.startswith('Proof') or 
                 'try now rewrite get_set_diff in *;' in cmd  # this is ugly, but I don't know how to parse this correctly
             ):
-                print(cmd)
                 coq.run_stmt(cmd)
                 linear_commands.append(cmd)
             elif cmd:
@@ -2423,16 +2529,13 @@ def linearize_commands(project_path, module_path, remove_bullets=True, timeout=1
                 # if application of the last terms is unsuccessfull just accept cmd as is
                 if prev_tactic:
                     coq.restore_last_checkpoint()
-                    print(cmd)
                     coq.run_stmt(cmd)
                     linear_commands.append(cmd)
                 else:
                     states = coq._states.pop()
                     coq._states[-1].extend(states)
                     linear_commands.extend(tactics_to_append)
-                    print(tactics_to_append)
         else:
-            print(cmd)
             coq.run_stmt(cmd)
             linear_commands.append(cmd)
 
@@ -2443,6 +2546,29 @@ def linearize_commands(project_path, module_path, remove_bullets=True, timeout=1
 
     coq.kill()
     return linear_commands
+
+
+def print_mod_path(modpath):
+    if str(modpath[0]) == "MPdot":
+        return print_mod_path(modpath[1]) + "." + str(modpath[2][1])
+    elif str(modpath[0]) == "MPfile":
+        return ".".join([str(x[1]) for x in modpath[1][1]][::-1])
+    else:
+        assert str(modpath[0]) == "MPbound"
+        return ".".join(
+            [str(x[1]) for x in modpath[1][2][1]][::-1]
+            + [str(modpath[1][1][1])]
+        )
+    
+    
+def mod_path_file(modpath):
+    if str(modpath[0]) == "MPdot":
+        return mod_path_file(modpath[1])
+    elif str(modpath[0]) == "MPfile":
+        return ".".join([str(x[1]) for x in modpath[1][1]][::-1])
+    else:
+        assert str(modpath[0]) == "MPbound"
+        return ""
 
 
 def main() -> None:
