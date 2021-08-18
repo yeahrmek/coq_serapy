@@ -305,7 +305,7 @@ class SerapiInstance(threading.Thread):
             self.run_stmt(f"Module {module_path.stem}.")
         # Execute the commands corresponding to include flags we were
         # passed
-        
+
         prelude = module_path
         while prelude != project_path:
             prelude = prelude.parent
@@ -911,7 +911,7 @@ class SerapiInstance(threading.Thread):
         return short_ident
 
 
-    def query_env(self, module_path):
+    def query_env(self, module_path, cache=None):
         msg = self._ask_text("(Query () Env)")
         env = loads(msg, true='True_')[2][1][0]
         # store the constants
@@ -919,44 +919,47 @@ class SerapiInstance(threading.Thread):
         for const in env[1][0][1][0][1]:
             # identifier
             qualid = f"{print_mod_path(const[0][1])}.{const[0][2][1]}"
+            if cache and qualid in cache['constants']:
+                continue
 
-            if qualid.startswith('SerTop.'):
-                physical_path = str(module_path)
-            else:
-                physical_path = None  # should be implemented using (Query () LocateLibrary)
+            # if qualid.startswith('SerTop.'):
+            #     physical_path = str(module_path)
+            # else:
+            #     physical_path = None  # should be implemented using (Query () LocateLibrary)
 
             short_ident = self.query_qualid(qualid)
 
-            # term
-            assert str(const[1][0][1][0]) == "const_body"
-            if str(const[1][0][1][1][0]) == "Undef":  # delaration
-                opaque = None
-                term = None
-            elif str(const[1][0][1][1][0]) == "Def":  # transparent definition
-                opaque = False
-                term = None
-            else:
-                assert str(const[1][0][1][1][0]) == "OpaqueDef"  # opaque definition
-                opaque = True
-                term = None
+            # # term
+            # assert str(const[1][0][1][0]) == "const_body"
+            # if str(const[1][0][1][1][0]) == "Undef":  # delaration
+            #     opaque = None
+            #     term = None
+            # elif str(const[1][0][1][1][0]) == "Def":  # transparent definition
+            #     opaque = False
+            #     term = None
+            # else:
+            #     assert str(const[1][0][1][1][0]) == "OpaqueDef"  # opaque definition
+            #     opaque = True
+            #     term = None
 
             # type
             assert str(const[1][0][2][0]) == "const_type"
             type_sexp = dumps(const[1][0][2][1])
-            type_ = self._sexpStrToTermStr(type_sexp)
+            type_ = self._sexpStrToTermStr(type_sexp.replace("\\'", "'"))
             # sort = coq._ask_text(f"(Query () (Type {type_sexp}))")
             constants.append(
                 {
-                    "physical_path": physical_path,
+                    # "physical_path": physical_path,
                     "short_ident": short_ident,  # short identifier
                     "qualid": qualid,            # long identifier
-                    "term": term,                #
+                    # "term": term,                #
                     "type": type_,               # type of the constant
                     # "sort": sort,                # type of the type
-                    "opaque": opaque,            # whether constant is opaque or transparent
+                    # "opaque": opaque,            # whether constant is opaque or transparent
                     "sexp": dumps(const[1][0][2][1]),
                 }
             )
+
 
         # store the inductives
         inductives = []
@@ -964,15 +967,18 @@ class SerapiInstance(threading.Thread):
             # identifier
             qualid = f"{print_mod_path(induct[0][1])}.{induct[0][2][1]}"
 
+            if cache and qualid in cache['inductives']:
+                continue
+
             short_ident = self.query_qualid(qualid)
-            if qualid.startswith("SerTop."):
-            #     logical_path = "SerTop"
-                physical_path = str(module_path)
-            else:
-                logical_path = mod_path_file(induct[0][1])
-                # physical_path = os.path.relpath(self.query_library(logical_path))
-                physical_path = None
-            # physical_path += ":" + qualid[len(logical_path) + 1 :]
+            # if qualid.startswith("SerTop."):
+            # #     logical_path = "SerTop"
+            #     physical_path = str(module_path)
+            # else:
+            #     logical_path = mod_path_file(induct[0][1])
+            #     # physical_path = os.path.relpath(self.query_library(logical_path))
+            #     physical_path = None
+            # # physical_path += ":" + qualid[len(logical_path) + 1 :]
 
             blocks = []
             for blk in induct[1][0][0][1]:
@@ -991,12 +997,13 @@ class SerapiInstance(threading.Thread):
                         "constructors": constructors,
                     }
                 )
-                
+
             inductives.append(
                 {
-                    "physical_path": physical_path,
+                    # "physical_path": physical_path,
+                    "qualid": qualid,
                     "blocks": blocks,
-                    "is_record": str(induct[1][0][1][1]) != "NotRecord",
+                    # "is_record": str(induct[1][0][1][1]) != "NotRecord",
                     "sexp": dumps(induct),
                 }
             )
@@ -2382,7 +2389,7 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
         # Check parenthesis structure.
         if prev_cmd:
             cmd = prev_cmd + cmd
-            prev_cmd = ''        
+            prev_cmd = ''
 
         if not _is_parentheses_correct(cmd):
             prev_cmd = cmd
@@ -2423,7 +2430,7 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
                 'Ltac' in cmd or
                 'cycle ' in cmd or
                 cmd.endswith('...') or
-                cmd.startswith('Proof') or 
+                cmd.startswith('Proof') or
                 'try now rewrite get_set_diff in *;' in cmd  # this is ugly, but I don't know how to parse this correctly
             ):
                 coq.run_stmt(cmd)
@@ -2478,12 +2485,12 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
                         goal_idx = first_tac_goal_idx
                     else:
                         goal_idx, tactic = split_goal_idx_tactic(tactic)
-                    
+
                     if isinstance(goal_idx, int):
                         goal_idx += 1
                     elif goal_idx is None or goal_idx == 'all':
                         goal_idx = 1
-                    
+
                     goal_idx_backup = goal_idx
 
                     if not tactic.startswith('['):
@@ -2559,8 +2566,8 @@ def print_mod_path(modpath):
             [str(x[1]) for x in modpath[1][2][1]][::-1]
             + [str(modpath[1][1][1])]
         )
-    
-    
+
+
 def mod_path_file(modpath):
     if str(modpath[0]) == "MPdot":
         return mod_path_file(modpath[1])

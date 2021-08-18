@@ -143,3 +143,12 @@ def silent():
     yield
     sys.stderr = save_stderr
     sys.stdout = save_stdout
+
+
+def update_cache(sexp_cache, env):
+    for const in env[0]:
+        sexp_cache['constants'][const['qualid']] = {k: v for k, v in const.items() if k != 'qualid'}
+
+    for ind in env[1]:
+        sexp_cache['inductives'][ind['qualid']] = {k: v for k, v in ind.items() if k != 'qualid'}
+    return sexp_cache
