@@ -145,7 +145,13 @@ def silent():
     sys.stdout = save_stdout
 
 
-def update_cache(sexp_cache, env):
+def update_cache(env, sexp_cache=None):
+    if sexp_cache is None:
+        sexp_cache = {'constants': {}, 'inductives': {}}
+
+    if not 'constants' in sexp_cache or not 'inductives' in sexp_cache:
+        raise ValueError
+
     for const in env[0]:
         sexp_cache['constants'][const['qualid']] = {k: v for k, v in const.items() if k != 'qualid'}
 
