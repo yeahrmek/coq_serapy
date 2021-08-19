@@ -944,8 +944,13 @@ class SerapiInstance(threading.Thread):
 
             # type
             assert str(const[1][0][2][0]) == "const_type"
-            type_sexp = dumps(const[1][0][2][1])
-            type_ = self._sexpStrToTermStr(type_sexp.replace("\\'", "'"))
+            try:
+                type_sexp = dumps(const[1][0][2][1])
+                type_ = self._sexpStrToTermStr(type_sexp.replace("\\'", "'"))
+            except RecursionError:
+                type_sexp = None,
+                type_ = None
+
             # sort = coq._ask_text(f"(Query () (Type {type_sexp}))")
             constants.append(
                 {
@@ -956,7 +961,7 @@ class SerapiInstance(threading.Thread):
                     "type": type_,               # type of the constant
                     # "sort": sort,                # type of the type
                     # "opaque": opaque,            # whether constant is opaque or transparent
-                    "sexp": dumps(const[1][0][2][1]),
+                    "sexp": type_sexp,
                 }
             )
 
@@ -2336,20 +2341,6 @@ def _split_square_brackets(tactic):
     tactic_split = [t.strip() + '.' if t else 'idtac.' for t in tactic_split]
 
     return tactic_split
-
-
-# def tactical_first(coq, tactic, goal_idx):
-#     """
-#     Linearize tactical `first`.
-#     It applies the tactic to each goal consequently and ignores failed tactics
-
-#     """
-#     tactic = f"{goal_idx}: {' '.join(tactic.split(' ')[1:])}"
-#     try:
-#         coq.run_stmt(tactic)
-#     except SerapiException as e:
-#         return None
-#     return tactic
 
 
 def split_goal_idx_tactic(tactic_str):
