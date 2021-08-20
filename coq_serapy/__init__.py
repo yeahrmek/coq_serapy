@@ -901,15 +901,19 @@ class SerapiInstance(threading.Thread):
             qualid = qualid[len("SerTop.") :]
             msg = loads(self._ask_text(f'(Query () (Locate "{qualid}"))'))[2][1]
 
-        assert len(msg) == 1
-        short_responses = msg[0][1][0][1]
-        assert str(short_responses[1][0]) == "DirPath"
-        short_ident = ".".join(
-            [str(x[1]) for x in short_responses[1][1][::-1]]
-            + [str(short_responses[2][1])]
-        )
-        return short_ident
+        if len(msg) == 1:
+            short_responses = msg[0][1][0][1]
+            assert str(short_responses[1][0]) == "DirPath"
+            short_ident = ".".join(
+                [str(x[1]) for x in short_responses[1][1][::-1]]
+                + [str(short_responses[2][1])]
+            )
+        elif len(msg) == 0:
+            short_ident = qualid
+        else:
+            raise ValueError(f"Something wrong with the qualid '{qualid}'.")
 
+        return short_ident
 
     def query_env(self, module_path, cache=None):
         msg = self._ask_text("(Query () Env)")

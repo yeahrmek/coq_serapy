@@ -1,5 +1,7 @@
 .idea/
 __pycache__/
+.ipynb_checkpoints/
+coq_serapy/.ipynb_checkpoints/
 
 *.egg-info/
 
