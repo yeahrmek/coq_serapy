@@ -537,13 +537,13 @@ class SerapiInstance(threading.Thread):
             self.quiet = True
             self.run_stmt(f"predict {k}.", timeout=120)
             self.quiet = oldquiet
-            premise_names = self.feedbacks[3][1][3][1][3][1].split(", ")
+            premise_names = self.feedbacks[3][1][3][1][3][1][1].split(", ")
             self.cancel_last()
             return premise_names
         except CoqExn:
             return []
 
-    def get_hammer_premises(self, k: int = 10) -> List[str]:
+    def get_hammer_premises(self, k: int = 10, return_sexp=False) -> List[str]:
         old_timeout = self.timeout
         self.timeout = 600
         names = self.get_hammer_premise_names(k)
@@ -566,7 +566,7 @@ class SerapiInstance(threading.Thread):
                         nextmsg = self._get_message()
                     except TimeoutError:
                         eprint("Timed out waiting for message")
-                pp_term = nextmsg[1][3][1][3]
+                pp_term = nextmsg[1][3][1][3][1]
                 try:
                     nextmsg = self._get_message()
                 except TimeoutError:
@@ -579,10 +579,14 @@ class SerapiInstance(threading.Thread):
                     self._get_completed()
                 except TimeoutError:
                     eprint("Timed out waiting for completed message")
-                try:
-                    result = re.sub(r"\s+", " ", self._ppToTermStr(pp_term))
-                except TimeoutError:
-                    eprint("Timed out when converting ppterm")
+
+                result = pp_term
+                if not return_sexp:
+                    try:
+                        result = re.sub(r"\s+", " ", self._ppToTermStr(pp_term))
+                    except TimeoutError:
+                        eprint("Timed out when converting ppterm")
+
                 return result
             except TimeoutError:
                 eprint("Timed out when getting full line!")
@@ -920,7 +924,7 @@ class SerapiInstance(threading.Thread):
         env = loads(msg, true='True_')[2][1][0]
         # store the constants
         constants = []
-        for const in env[1][0][1][0][1]:
+        for const in tqdm(env[1][0][1][0][1]):
             # identifier
             qualid = f"{print_mod_path(const[0][1])}.{const[0][2][1]}"
             if cache and qualid in cache['constants']:
@@ -972,7 +976,7 @@ class SerapiInstance(threading.Thread):
 
         # store the inductives
         inductives = []
-        for induct in env[1][0][1][1][1]:
+        for induct in tqdm(env[1][0][1][1][1]):
             # identifier
             qualid = f"{print_mod_path(induct[0][1])}.{induct[0][2][1]}"
 
@@ -1148,6 +1152,10 @@ class SerapiInstance(threading.Thread):
                                   ["contents", ["Message", "Notice",
                                                 [], TAIL]]]],
                     lambda *args: True,
+                    ['Feedback', [['doc_id', int], ['span_id', int],
+                                  ['route', int],
+                                  ['contents', ['Message', TAIL]]]],
+                    lambda *args: True,
                     _, lambda *args: False):
             oldmsg = nextmsg
             try:
@@ -1157,7 +1165,7 @@ class SerapiInstance(threading.Thread):
                 pass
         self._get_completed()
         str_lemmas = [re.sub(r"\s+", " ",
-                             self._ppToTermStr(lemma_msg[1][3][1][3]))
+                             self._ppToTermStr(lemma_msg[1][3][1][3][1]))
                       for lemma_msg in lemma_msgs[:10]]
         return str_lemmas
 
@@ -1255,6 +1263,11 @@ class SerapiInstance(threading.Thread):
                    guard=self.verbose>=3)
             return self._get_message(complete=complete)
         try:
+            if '[)' in msg_text:  # TODO: why this happens?
+                msg_text = msg_text.replace('[)', '"[")')
+            msg_text = msg_text.replace("(Pp_string [)", '(Pp_string "[")')
+            msg_text = msg_text.replace("(Pp_string ])", '(Pp_string "]")')
+            # print(msg_text)
             return loads(msg_text, nil=None)
         except ExpectClosingBracket:
             eprint(
@@ -1489,9 +1502,9 @@ class SerapiInstance(threading.Thread):
                             [], [], [])
 
     def get_lemmas_about_head(self) -> List[str]:
-        if self.goals.strip() == "":
+        if self.goals.str.strip() == "":
             return []
-        goal_head = self.goals.split()[0]
+        goal_head = self.goals.str.split()[0]
         if (goal_head == "forall"):
             return []
         answer = self.search_about(goal_head)
