@@ -548,60 +548,79 @@ class SerapiInstance(threading.Thread):
         self.timeout = 600
         names = self.get_hammer_premise_names(k)
 
-        def get_full_line(name: str) -> str:
+        full_lines = {
+            name: self.get_full_line(name) for name in names
+        }
+        full_lines = {k: v for k, v in full_lines.items() if v}
+        self.timeout = old_timeout
+        return full_lines
+
+    def get_full_line(self, name: str, return_sexp=False) -> str:
+        try:
+            self._send_acked(f"(Query () (Vernac \"Check {name}.\"))")
             try:
-                self._send_acked(f"(Query () (Vernac \"Check {name}.\"))")
-                try:
-                    nextmsg = self._get_message()
-                except TimeoutError:
-                    eprint("Timed out waiting for initial message")
-                while match(normalizeMessage(nextmsg),
-                            ["Feedback", [["doc_id", int], ["span_id", int],
-                                          ["route", int],
-                                          ["contents", "Processed"]]],
-                            lambda *args: True,
-                            _,
-                            lambda *args: False):
-                    try:
-                        nextmsg = self._get_message()
-                    except TimeoutError:
-                        eprint("Timed out waiting for message")
-                pp_term = nextmsg[1][3][1][3][1]
+                nextmsg = self._get_message()
+            except TimeoutError:
+                eprint("Timed out waiting for initial message")
+            while match(normalizeMessage(nextmsg),
+                        ["Feedback", [["doc_id", int], ["span_id", int],
+                                        ["route", int],
+                                        ["contents", "Processed"]]],
+                        lambda *args: True,
+                        _,
+                        lambda *args: False):
                 try:
                     nextmsg = self._get_message()
                 except TimeoutError:
                     eprint("Timed out waiting for message")
-                match(normalizeMessage(nextmsg),
-                      ["Answer", int, ["ObjList", []]],
-                      lambda *args: None,
-                      _, lambda *args: raise_(UnrecognizedError(nextmsg)))
-                try:
-                    self._get_completed()
-                except TimeoutError:
-                    eprint("Timed out waiting for completed message")
 
-                result = pp_term
-                if not return_sexp:
-                    try:
-                        result = re.sub(r"\s+", " ", self._ppToTermStr(pp_term))
-                    except TimeoutError:
-                        eprint("Timed out when converting ppterm")
+            coqexn_msg = match(
+                normalizeMessage(nextmsg),
+                ['Answer', int, ['CoqExn', TAIL]],
+                lambda sentence_num, rest:
+                "\n".join(searchStrsInMsg(rest)),
+                str, lambda s: s,
+                [str], lambda s: s,
+                _, None
+            )
 
-                return result
+            if coqexn_msg:
+                self._get_completed()
+                raise CoqExn(coqexn_msg)
+
+            pp_term = nextmsg[1][3][1][3][1]
+            try:
+                nextmsg = self._get_message()
             except TimeoutError:
-                eprint("Timed out when getting full line!")
-                return ""
-        full_lines = [line for line in
-                      [get_full_line(name) for name in names]
-                      if line]
-        self.timeout = old_timeout
-        return full_lines
+                eprint("Timed out waiting for message")
+            match(normalizeMessage(nextmsg),
+                    ["Answer", int, ["ObjList", []]],
+                    lambda *args: None,
+                    _, lambda *args: raise_(UnrecognizedError(nextmsg)))
+            try:
+                self._get_completed()
+            except TimeoutError:
+                eprint("Timed out waiting for completed message")
+
+            try:
+                full_line = re.sub(r"\s+", " ", self._ppToTermStr(pp_term))
+            except TimeoutError:
+                eprint("Timed out when converting ppterm")
+                return None
+
+            result = full_line
+            if return_sexp:
+                result = (full_line, pp_term)
+            return result
+        except TimeoutError:
+            eprint("Timed out when getting full line!")
+            return None
 
     # Run a command. This is the main api function for this
     # class. Sends a single command to the running serapi
     # instance. Returns nothing: if you want a response, call one of
     # the other methods to get it.
-    def run_stmt(self, stmt: str, timeout: Optional[int] = None):
+    def run_stmt(self, stmt: str, timeout: Optional[int] = None, return_sexp=False):
         if timeout:
             old_timeout = self.timeout
             self.timeout = timeout
@@ -628,6 +647,7 @@ class SerapiInstance(threading.Thread):
                 # Send the command
                 assert self.message_queue.empty(), self.messages
                 self._send_acked("(Add () \"{}\")\n".format(stm))
+
                 # Get the response, which indicates what state we put
                 # serapi in.
                 self._update_state()
@@ -638,6 +658,9 @@ class SerapiInstance(threading.Thread):
                 is_goal_open = re.match(r"\s*(?:\d+\s*:)?\s*[{]\s*", stm)
                 is_goal_close = re.match(r"\s*[}]\s*", stm)
                 is_unshelve = re.match(r"\s*Unshelve\s*\.\s*", stm)
+
+                if return_sexp:
+                    ast = loads(self._ask_text(f'(Parse () "{stm}")'))[2][1][0]
 
                 # Execute the statement.
                 self._send_acked("(Exec {})\n".format(self.cur_state))
@@ -672,6 +695,8 @@ class SerapiInstance(threading.Thread):
                     # list.
                     self.tactic_history.addTactic(stm)
 
+                if return_sexp and self.proof_context and self.proof_context.fg_goals:
+                    ast = dumps(self.proof_context.fg_goals[0].goal.ast)
         # If we hit a problem let the user know what file it was in,
         # and then throw it again for other handlers. NOTE: We may
         # want to make this printing togglable (at this level), since
@@ -700,6 +725,9 @@ class SerapiInstance(threading.Thread):
             #     (self.proof_context is None and ending_proof(stmt))
             if timeout:
                 self.timeout = old_timeout
+
+        if return_sexp:
+            return ast
 
     @property
     def prev_tactics(self):
@@ -805,7 +833,6 @@ class SerapiInstance(threading.Thread):
               lambda msg: raise_(UnrecognizedError(msg)))
         self._get_completed()
         return result
-
 
     # Flush all messages in the message queue
     def _flush_queue(self) -> None:
@@ -1022,6 +1049,68 @@ class SerapiInstance(threading.Thread):
             )
         return constants, inductives
 
+    def query_definition(self, name):
+        """
+        Try to retrieve AST (kernel-terms) for a given name of an object.
+        The object should be somehow imported or processed by Coq to have
+        definition
+
+        Args:
+            name : str
+        Returns:
+            s-expression
+        """
+        msg = loads(self._ask_text(f'(Query () (Definition "{name}"))'))
+        if not msg[2][1]:
+            return None
+        return msg[2][1][0]
+
+    def _query_vernac(self, cmd):
+        cmd = f'(Query () (Vernac "{cmd}"))'
+        self._send_acked(cmd)
+        nextmsg = self._get_message()
+        while match(normalizeMessage(nextmsg),
+                    ["Feedback", [["doc_id", int], ["span_id", int],
+                                  ["route", int],
+                                  ["contents", ["ProcessingIn", str]]]],
+                    lambda *args: True,
+                    ["Feedback", [["doc_id", int], ["span_id", int],
+                                  ["route", int],
+                                  ["contents", "Processed"]]],
+                    lambda *args: True,
+                    _, lambda *args: False):
+            nextmsg = self._get_message()
+        prevmsg = nextmsg
+        while match(normalizeMessage(nextmsg),
+                    ['Feedback', [['doc_id', int], ['span_id', int],
+                                  ['route', int],
+                                  ['contents', ['Message', TAIL]]]],
+                    lambda *args: True,
+                    _, lambda *args: False):
+            prevmsg = nextmsg
+            nextmsg = self._get_message()
+        self._get_completed()
+
+        if match(normalizeMessage(prevmsg),
+                 ['Answer', _, ['CoqExn', TAIL]],
+                 True, _, False):
+            return None
+        try:
+            prevmsg[1][3][1][3]
+        except:
+            raise CoqExn(prevmsg)
+
+        return prevmsg[1][3][1][3]
+
+    def locate_library(self, module):
+        """
+        Try to locate the physical path of the given library
+        """
+        cmd = f'Locate Library {module}.'
+        msg = self._query_vernac(cmd)
+        path = str(msg[1][2][1][-1][1])
+        return path
+
     # Cancel the last command which was sucessfully parsed by
     # serapi. Even if the command failed after parsing, this will
     # still cancel it. You need to call this after a command that
@@ -1143,8 +1232,7 @@ class SerapiInstance(threading.Thread):
                                   ["route", int],
                                   ["contents", "Processed"]]],
                     lambda *args: True,
-                    _,
-                    lambda *args: False):
+                    _, lambda *args: False):
             nextmsg = self._get_message()
         while match(normalizeMessage(nextmsg),
                     ["Feedback", [["doc_id", int], ["span_id", int],
@@ -1160,12 +1248,12 @@ class SerapiInstance(threading.Thread):
             oldmsg = nextmsg
             try:
                 nextmsg = self._get_message()
-                lemma_msgs.append(oldmsg)
+                lemma_msgs.append(dumps(oldmsg[1][3][1][3][1]))
             except RecursionError:
                 pass
         self._get_completed()
-        str_lemmas = [re.sub(r"\s+", " ",
-                             self._ppToTermStr(lemma_msg[1][3][1][3][1]))
+        str_lemmas = [(re.sub(r"\s+", " ", self._ppStrToTermStr(lemma_msg)),
+                       lemma_msg)
                       for lemma_msg in lemma_msgs[:10]]
         return str_lemmas
 
@@ -1617,8 +1705,10 @@ normal_lemma_starting_patterns = [
     "Proposition",
     r"(?:Polymorphic\s+)?Definition",
     "Program\s+Definition",
+    "Program\s+Instance",
     "Example",
     "Fixpoint",
+    # "Inductive",
     "Corollary",
     "Let",
     r"(?<!Declare\s)(?:Polymorphic\s+)?Instance",
@@ -1633,7 +1723,9 @@ special_lemma_starting_patterns = [
     "Next Obligation",
     r"Obligation\s+\d+",
     "Add Parametric Morphism"]
-
+other_starting_patterns = [
+    "Functional"
+]
 lemma_starting_patterns = \
     normal_lemma_starting_patterns + special_lemma_starting_patterns
 
@@ -1705,6 +1797,7 @@ def update_sm_stack(sm_stack: List[Tuple[str, bool]],
 
 def module_prefix_from_stack(sm_stack: List[Tuple[str, bool]]) -> str:
     return "".join([sm[0] + "." for sm in sm_stack if not sm[1]])
+
 
 def sm_prefix_from_stack(sm_stack: List[Tuple[str, bool]]) -> str:
     return "".join([sm[0] + "." for sm in sm_stack])
@@ -1978,8 +2071,9 @@ def lemma_name_from_statement(stmt: str) -> str:
     if derive_match:
         return derive_match.group(3)
     lemma_match = re.match(
-        r"\s*(?:(?:Local|Global)\s+)?(?:" + "|".join(normal_lemma_starting_patterns) +
-        r")\s+([\w'\.]*)(.*)",
+        r"\s*(?:(?:Local|Global)\s+)?(?:" + "|".join(
+            normal_lemma_starting_patterns + other_starting_patterns) +
+        r"):?\s+([\w'\.]*)(.*)",
         stripped_stmt,
         flags=re.DOTALL)
     assert lemma_match, (stripped_stmt, stmt)
