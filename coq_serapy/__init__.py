@@ -1060,10 +1060,19 @@ class SerapiInstance(threading.Thread):
         Returns:
             s-expression
         """
-        msg = loads(self._ask_text(f'(Query () (Definition "{name}"))'))
-        if not msg[2][1]:
-            return None
-        return msg[2][1][0]
+        self._send_acked(f'(Query () (Definition "{name}"))')
+
+        obj_list_match = None
+        while obj_list_match is None:
+            nextmsg = self._get_message_text()
+            obj_list_match = re.match(r"\(Answer\s*\d+\(ObjList(.*)\)\)", nextmsg)
+            coq_exn_match = re.match(r"\(Answer \d+\(CoqExn", nextmsg)
+            if coq_exn_match:
+                self._get_completed()
+                return None
+
+        self._get_completed()
+        return obj_list_match.group(1)
 
     def _query_vernac(self, cmd):
         cmd = f'(Query () (Vernac "{cmd}"))'
@@ -1724,10 +1733,11 @@ special_lemma_starting_patterns = [
     r"Obligation\s+\d+",
     "Add Parametric Morphism"]
 other_starting_patterns = [
-    "Functional"
+    "Functional",
+    "Inductive"
 ]
 lemma_starting_patterns = \
-    normal_lemma_starting_patterns + special_lemma_starting_patterns
+    normal_lemma_starting_patterns + special_lemma_starting_patterns + other_starting_patterns
 
 
 def possibly_starting_proof(command: str) -> bool:
@@ -2062,18 +2072,36 @@ def tacticTakesIdentifierArg(stem: str) -> bool:
 
 
 def lemma_name_from_statement(stmt: str) -> str:
-    if ("Goal" in stmt or "Obligation" in stmt or "Morphism" in stmt):
+    if ("Goal" in stmt or "Obligation" in stmt or re.match(r"\sMorphism\s", stmt)):
         return ""
     stripped_stmt = kill_comments(stmt).strip()
+
+    # Derive match 1
     derive_match = re.fullmatch(
         r"\s*Derive\s+([\w'_]+)\s+SuchThat\s+(.*)\s+As\s+([\w']+)\.\s*",
         stripped_stmt, flags=re.DOTALL)
     if derive_match:
         return derive_match.group(3)
+
+    # Derive match 2
+    derive_match = re.fullmatch(
+        r"\s*Derive\s+([\w'_]+)\s+(.*)\s+with\s+.*",
+        stripped_stmt, flags=re.DOTALL)
+    if derive_match:
+        return derive_match.group(2)
+
+    # Morphism
+    morphism_match = re.fullmatch(
+        r"\s*Add(?:\s+Parametric)?\s+Morphism.*\s+as\s+([\w'_]+)\.\s*",
+        stripped_stmt, flags=re.DOTALL
+    )
+    if morphism_match:
+        return morphism_match.group(1)
+
     lemma_match = re.match(
         r"\s*(?:(?:Local|Global)\s+)?(?:" + "|".join(
             normal_lemma_starting_patterns + other_starting_patterns) +
-        r"):?\s+([\w'\.]*)(.*)",
+        r")(?::?\s*|\s+)([\w'\.]*)(.*)",
         stripped_stmt,
         flags=re.DOTALL)
     assert lemma_match, (stripped_stmt, stmt)
