@@ -1074,6 +1074,38 @@ class SerapiInstance(threading.Thread):
         self._get_completed()
         return obj_list_match.group(1)
 
+    def query_assumptions(self, name):
+        """
+        Return ast of assumptions of a global:
+        the terms that are defined by
+            Axiom, Axioms
+            Conjecture, Conjectures
+            Parameter,Parameters
+            Hypothesis, Hypotheses
+            Variable, Variables
+        """
+        msg = self._ask_text(f'(Query () (Assumptions "{name}"))')
+        if re.match(r'\(Answer \d+\(CoqExn.*', msg):
+            return None
+
+        assumption = re.match(r'\(Answer \d+\(ObjList\((.*)\)\)\)\s*', msg).group(1)
+        assumption = loads(assumption)[1]
+        ast = None
+        if assumption[2][1]:
+            # variable
+            ast = dumps(assumption[2][1][0])
+        if assumption[3][1]:
+            # axiom
+            ast = dumps(assumption[3][1][0][1])
+        if assumption[4][1]:
+            # opaque
+            ast = dumps(assumption[4][1][0])
+        if assumption[5][1]:
+            # trans
+            ast = dumps(assumption[5][1][0][1])
+
+        return ast
+
     def _query_vernac(self, cmd):
         cmd = f'(Query () (Vernac "{cmd}"))'
         self._send_acked(cmd)
@@ -1739,10 +1771,26 @@ other_starting_patterns = [
 lemma_starting_patterns = \
     normal_lemma_starting_patterns + special_lemma_starting_patterns + other_starting_patterns
 
+assumptions_starting_patterns = [
+    "Axiom", "Axioms",
+    "Conjecture", "Conjectures",
+    "Parameter", "Parameters",
+    "Hypothesis", "Hypotheses",
+    "Variable", "Variables"
+]
 
 def possibly_starting_proof(command: str) -> bool:
     stripped_command = kill_comments(command).strip()
     pattern = r"(?:(?:Local|Global)\s+)?(" + "|".join(lemma_starting_patterns) + r")\s*"
+    return bool(re.match(pattern,
+                         stripped_command))
+
+
+def possibly_starting_term(command):
+    stripped_command = kill_comments(command).strip()
+    pattern = r"(?:(?:Local|Global)\s+)?(" + \
+                 "|".join(lemma_starting_patterns +
+                          assumptions_starting_patterns) + r")\s*"
     return bool(re.match(pattern,
                          stripped_command))
 
@@ -2100,7 +2148,9 @@ def lemma_name_from_statement(stmt: str) -> str:
 
     lemma_match = re.match(
         r"\s*(?:(?:Local|Global)\s+)?(?:" + "|".join(
-            normal_lemma_starting_patterns + other_starting_patterns) +
+            normal_lemma_starting_patterns +
+            other_starting_patterns +
+            assumptions_starting_patterns) +
         r")(?::?\s*|\s+)([\w'\.]*)(.*)",
         stripped_stmt,
         flags=re.DOTALL)
