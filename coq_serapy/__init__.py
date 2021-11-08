@@ -2552,7 +2552,7 @@ def split_goal_idx_tactic(tactic_str):
         return [None, tactic_str]
     else:
         goal_idx = int(goal_idx_match.group(1)) - 1
-        return goal_idx, re.split(r"\d+\s*:\s*", tactic_str)[-1]
+        return goal_idx, re.split(r"\d+\s*:\s*", tactic_str, maxsplit=1)[-1]
 
 
 def linearize_commands(project_path, module_path, remove_bullets=False, timeout=10):
