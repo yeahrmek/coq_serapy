@@ -519,10 +519,10 @@ class SerapiInstance(threading.Thread):
     def _ask(self, cmd: str, complete: bool = True):
         return loads(self._ask_text(cmd, complete))
 
-    def _ask_text(self, cmd: str, complete: bool = True):
+    def _ask_text(self, cmd: str, complete: bool = True, skip_feedback: bool = False):
         assert self.message_queue.empty(), self.messages
         self._send_acked(cmd)
-        msg = self._get_message_text(complete)
+        msg = self._get_message_text(complete, skip_feedback)
         return msg
 
     @property
@@ -1084,7 +1084,7 @@ class SerapiInstance(threading.Thread):
             Hypothesis, Hypotheses
             Variable, Variables
         """
-        msg = self._ask_text(f'(Query () (Assumptions "{name}"))')
+        msg = self._ask_text(f'(Query () (Assumptions "{name}"))', skip_feedback=True)
         if re.match(r'\(Answer \d+\(CoqExn.*', msg):
             return None
 
@@ -1407,9 +1407,12 @@ class SerapiInstance(threading.Thread):
             eprint(f"Assertion error while parsing s-expr {msg_text}")
             raise CoqAnomaly("")
 
-    def _get_message_text(self, complete=False) -> Any:
+    def _get_message_text(self, complete=False, skip_feedback=False) -> Any:
         try:
             msg = self.message_queue.get(timeout=self.timeout)
+            if skip_feedback:
+                while msg.startswith('(Feedback'):
+                    msg = self.message_queue.get(timeout=self.timeout)
             if complete:
                 self._get_completed()
             assert msg is not None
