@@ -648,11 +648,17 @@ class SerapiInstance(threading.Thread):
                 assert self.message_queue.empty(), self.messages
                 self._send_acked("(Add () \"{}\")\n".format(stm))
 
+                self.feedbacks = []
+
                 # Get the response, which indicates what state we put
                 # serapi in.
                 self._update_state()
                 self._get_completed()
                 assert self.message_queue.empty()
+
+                # TODO: only for hammer tactic
+                if not 'hammer.' in stm:
+                    self.feedbacks = []
 
                 # Track goal opening/closing
                 is_goal_open = re.match(r"\s*(?:\d+\s*:)?\s*[{]\s*", stm)
@@ -665,7 +671,7 @@ class SerapiInstance(threading.Thread):
                 # Execute the statement.
                 self._send_acked("(Exec {})\n".format(self.cur_state))
                 # Finally, get the result of the command
-                self.feedbacks = self._get_feedbacks()
+                self.feedbacks.extend(self._get_feedbacks())
                 # Get a new proof context, if it exists
                 if is_goal_open:
                     self._get_enter_goal_context()
@@ -783,6 +789,9 @@ class SerapiInstance(threading.Thread):
                 raise CoqExn(coqexn_msg)
             elif re.match(r".*The identifier (.*) is reserved\..*",
                           coqexn_msg):
+                self._get_completed()
+                raise CoqExn(coqexn_msg)
+            elif 'Hammer failed' in coqexn_msg:
                 self._get_completed()
                 raise CoqExn(coqexn_msg)
             else:
@@ -1346,18 +1355,20 @@ class SerapiInstance(threading.Thread):
                     ["Feedback", TAIL], lambda tail: True,
                     ["Answer", int, "Completed"], lambda sidx: True,
                     _, lambda x: False):
+            if str(msg[0]) == 'Feedback':
+                self.feedbacks.append(msg)
             msg = self._get_message()
 
         return match(normalizeMessage(msg),
-                     ["Answer", int, list],
-                     lambda state_num, contents:
-                     match(contents,
-                           ["CoqExn", TAIL],
-                           lambda rest:
-                           raise_(CoqExn("\n".join(searchStrsInMsg(rest)))),
-                           ["Added", int, TAIL],
-                           lambda state_num, tail: state_num),
-                     _, lambda x: raise_(BadResponse(msg)))
+                    ["Answer", int, list],
+                    lambda state_num, contents:
+                    match(contents,
+                        ["CoqExn", TAIL],
+                        lambda rest:
+                        raise_(CoqExn("\n".join(searchStrsInMsg(rest)))),
+                        ["Added", int, TAIL],
+                        lambda state_num, tail: state_num),
+                    _, lambda x: raise_(BadResponse(msg)))
 
     def _discard_feedback(self) -> None:
         try:
@@ -1504,9 +1515,9 @@ class SerapiInstance(threading.Thread):
 
             cancelled_answer = self._get_message()
 
-            match(normalizeMessage(cancelled_answer),
+            statenum = match(normalizeMessage(cancelled_answer),
                   ["Answer", int, ["Canceled", list]],
-                  lambda _, statenums: min(statenums),
+                  lambda _, statenums: min(statenums) if statenums else None,
                   ["Answer", int, ["CoqExn", TAIL]],
                   lambda statenum, rest:
                   raise_(CoqExn("\n".join(searchStrsInMsg(rest)))),
