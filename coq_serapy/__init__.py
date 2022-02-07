@@ -256,6 +256,7 @@ class SerapiInstance(threading.Thread):
     def __init__(self, coq_command: List[str], module_path,
                  project_path: str,
                  timeout: int = 30, use_hammer: bool = False,
+                 kernel_level_terms=True,
                  log_outgoing_messages: Optional[str] = None, verbose=0, quiet=True) -> None:
         module_path = Path(str(module_path))
         project_path = Path(project_path)
@@ -275,6 +276,7 @@ class SerapiInstance(threading.Thread):
         self._fin = self._proc.stdin
         self.timeout = timeout
         self.log_outgoing_messages = log_outgoing_messages
+        self.kernel_level_terms = kernel_level_terms
 
         # Initialize some state that we'll use to keep track of the
         # coq state. This way we don't have to do expensive queries to
@@ -1560,7 +1562,12 @@ class SerapiInstance(threading.Thread):
         # wrong way if we run into this bug:
         # https://github.com/ejgallego/coq-serapi/issues/150
         try:
-            text_response = self._ask_text("(Query () Goals)")
+            if self.kernel_level_terms:
+                text_response = self._ask_text("(Query () Goals)")
+                goals_match_regex = all_goals_regex
+            else:
+                text_response = self._ask_text("(Query () EGoals)")
+                goals_match_regex = ext_goals_regex
             context_match = re.fullmatch(
                 r"\(Answer\s+\d+\s*\(ObjList\s*(.*)\)\)\n",
                 text_response)
@@ -1573,7 +1580,7 @@ class SerapiInstance(threading.Thread):
             if context_str == "()":
                 self.proof_context = None
             else:
-                goals_match = all_goals_regex.match(context_str)
+                goals_match = goals_match_regex.match(context_str)
                 if not goals_match:
                     raise BadResponse(context_str)
                 fg_goals_str, bg_goals_str, \
@@ -1723,6 +1730,13 @@ goal_regex = re.compile(r"\(\(info\s*\(\(evar\s*\(Ser_Evar\s*(\d+)\)\)"
                         r"\(ty\s*(.*)\)\s*\(hyp\s*(.*)\)\)")
 
 all_goals_regex = re.compile(r"\(\(CoqGoal\s*"
+                             r"\(\(goals\s*(.*)\)"
+                             r"\(stack\s*(.*)\)"
+                             r"\(shelf\s*(.*)\)"
+                             r"\(given_up\s*(.*)\)"
+                             r"\(bullet\s*.*\)\)\)\)")
+
+ext_goals_regex = re.compile(r"\(\(CoqExtGoal\s*"
                              r"\(\(goals\s*(.*)\)"
                              r"\(stack\s*(.*)\)"
                              r"\(shelf\s*(.*)\)"
