@@ -865,9 +865,12 @@ class SerapiInstance(threading.Thread):
 
     @functools.lru_cache(maxsize=128)
     def _sexpStrToTermStr(self, sexp_str: str) -> str:
+        if self.kernel_level_terms:
+            serapi_command = f"(Print ((pp ((pp_format PpStr)))) (CoqConstr {sexp_str}))"
+        else:
+            serapi_command = f"(Print ((pp ((pp_format PpStr)))) (CoqExpr {sexp_str}))"
         try:
-            answer = self._ask(
-                f"(Print ((pp ((pp_format PpStr)))) (CoqConstr {sexp_str}))")
+            answer = self._ask(serapi_command)
             return match(normalizeMessage(answer),
                          ["Answer", int, ["ObjList", [["CoqString", _]]]],
                          lambda statenum, s: str(s),
