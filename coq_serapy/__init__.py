@@ -625,6 +625,9 @@ class SerapiInstance(threading.Thread):
         self._flush_queue()
         eprint("Running statement: " + stmt.lstrip('\n'),
                guard=self.verbose >= 2)  # lstrip makes output shorter
+
+        self._hist.append([stmt, False, -1])
+
         # We need to escape some stuff so that it doesn't get stripped
         # too early.
         stmt = stmt.replace("\\", "\\\\")
@@ -708,7 +711,8 @@ class SerapiInstance(threading.Thread):
                 if return_sexp and self.proof_context and self.proof_context.fg_goals:
                     ast = dumps(self.proof_context.fg_goals[0].goal.ast)
 
-                self._hist.append(stm)
+                self._hist[-1][1] = True
+                self._hist[-1][2] = self.cur_state
 
         # If we hit a problem let the user know what file it was in,
         # and then throw it again for other handlers. NOTE: We may
@@ -734,6 +738,8 @@ class SerapiInstance(threading.Thread):
         return self.tactic_history.getCurrentHistory()
 
     def _handle_exception(self, e: SerapiException, stmt: str):
+        if not self._hist[-1][1]:
+            self._hist = self._hist[:-1]
         eprint("Problem running statement: {}\n".format(stmt),
                guard=(not self.quiet or self.verbose >= 2))
         match(e,
@@ -1191,15 +1197,7 @@ class SerapiInstance(threading.Thread):
                    f"from state {self.cur_state}",
                    guard=self.verbose >= 2)
 
-        try:
-            self.__cancel()
-            self._hist = self._hist[:-1]
-        except Exception as e:
-            if self.reset_on_cancel_fail:
-                self._hist = self._hist[:-1]
-                self.reset()
-            else:
-                raise e
+        self.__cancel()
 
         if not self.proof_context:
             assert len(self.tactic_history.getFullHistory()) == 0, \
@@ -1213,26 +1211,35 @@ class SerapiInstance(threading.Thread):
         return cancelled
 
     def __cancel(self) -> None:
-        self._flush_queue()
-        assert self.message_queue.empty(), self.messages
+        try:
+            self._flush_queue()
+            assert self.message_queue.empty(), self.messages
 
-        cancelled_state = self.cur_state
-        context_before = self.proof_context
+            cancelled_state = self.cur_state
+            context_before = self.proof_context
 
-        # Run the cancel
-        self._send_acked("(Cancel ({}))".format(self.cur_state))
+            # Run the cancel
+            self._send_acked("(Cancel ({}))".format(self.cur_state))
 
-        # Get the response from cancelling
-        self.cur_state = self._get_cancelled()
-        # Get a new proof context, if it exists
-        self._get_proof_context()
+            # Get the response from cancelling
+            self.cur_state = self._get_cancelled()
+            # Get a new proof context, if it exists
+            self._get_proof_context()
 
-        tactic_history = self.tactic_history.getFullHistory()
-        if tactic_history and tactic_history[-1][1] == cancelled_state:
-            self.tactic_history.removeLast(context_before.fg_goals)
+            tactic_history = self.tactic_history.getFullHistory()
+            if tactic_history and tactic_history[-1][1] == cancelled_state:
+                self.tactic_history.removeLast(context_before.fg_goals)
+            self._hist = self._hist[:-1]
+        except Exception as e:
+            if self.reset_on_cancel_fail:
+                self._hist = self._hist[:-1]
+                self.reset()
+            else:
+                raise e
 
     def cancel_failed(self) -> None:
         self.__cancel()
+
 
     def _get_cancelled(self) -> int:
         try:
@@ -1739,14 +1746,14 @@ class SerapiInstance(threading.Thread):
         #     pass
         self._proc.kill()
         self.__sema.release()
-    pass
+        pass
 
     def reset(self):
         hist = self._hist.copy()
         self.kill()
         self.init()
         self._hist = []
-        for stm in hist:
+        for stm, not_failed, state in hist:
             self.run_stmt(stm)
 
 
