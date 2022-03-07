@@ -293,6 +293,8 @@ class SerapiInstance(threading.Thread):
         self._fout = self._proc.stdout
         self._fin = self._proc.stdin
 
+        self._do_reset = False
+
         # Initialize some state that we'll use to keep track of the
         # coq state. This way we don't have to do expensive queries to
         # the other process to answer simple questions.
@@ -626,7 +628,7 @@ class SerapiInstance(threading.Thread):
         eprint("Running statement: " + stmt.lstrip('\n'),
                guard=self.verbose >= 2)  # lstrip makes output shorter
 
-        self._hist.append([stmt, False, -1])
+        self._hist.append([stmt, None, -1])
 
         # We need to escape some stuff so that it doesn't get stripped
         # too early.
@@ -671,6 +673,9 @@ class SerapiInstance(threading.Thread):
 
                 # Execute the statement.
                 self._send_acked("(Exec {})\n".format(self.cur_state))
+
+                self._hist[-1][1] = False
+
                 # Finally, get the result of the command
                 self.feedbacks.extend(self._get_feedbacks())
                 # Get a new proof context, if it exists
@@ -721,6 +726,10 @@ class SerapiInstance(threading.Thread):
         except (CoqExn, BadResponse, AckError,
                 CompletedError, TimeoutError) as e:
             self._handle_exception(e, stmt)
+        except CoqAnomaly as e:
+            if 'timing out' in str(e).lower() and not self._hist[-1][1]:
+                self._hist = self._hist[:-1]
+                self.reset()
         finally:
             if self.proof_context and self.verbose >= 3:
                 eprint(
@@ -738,8 +747,9 @@ class SerapiInstance(threading.Thread):
         return self.tactic_history.getCurrentHistory()
 
     def _handle_exception(self, e: SerapiException, stmt: str):
-        if not self._hist[-1][1]:
+        if self._hist[-1][1] is None or not self._hist[-1][1]:
             self._hist = self._hist[:-1]
+
         eprint("Problem running statement: {}\n".format(stmt),
                guard=(not self.quiet or self.verbose >= 2))
         match(e,
@@ -1238,7 +1248,11 @@ class SerapiInstance(threading.Thread):
                 raise e
 
     def cancel_failed(self) -> None:
-        self.__cancel()
+        if self._do_reset:
+            self.reset()
+            self._do_reset = False
+        else:
+            self.__cancel()
 
 
     def _get_cancelled(self) -> int:
@@ -1749,12 +1763,18 @@ class SerapiInstance(threading.Thread):
         pass
 
     def reset(self):
+        print("reset")
+        for x in self._hist:
+            print(x[0])
+        print()
         hist = self._hist.copy()
         self.kill()
         self.init()
         self._hist = []
         for stm, not_failed, state in hist:
             self.run_stmt(stm)
+
+        self._do_reset = False
 
 
 goal_regex = re.compile(r"\(\(info\s*\(\(evar\s*\(Ser_Evar\s*(\d+)\)\)"
