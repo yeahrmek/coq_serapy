@@ -265,6 +265,7 @@ class SerapiInstance(threading.Thread):
         self.module_path = Path(str(module_path))
         self.project_path = Path(project_path)
         self.reset_on_cancel_fail = reset_on_cancel_fail
+        self._n_resets = 0
         # Set up some threading stuff. I'm not totally sure what
         # daemon=True does, but I think I wanted it at one time or
         # other.
@@ -1763,6 +1764,7 @@ class SerapiInstance(threading.Thread):
         pass
 
     def reset(self):
+        self._n_resets += 1
         print("reset")
         for x in self._hist:
             print(x[0])
