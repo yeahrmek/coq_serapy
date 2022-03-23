@@ -55,6 +55,17 @@ class ProofContext(NamedTuple):
     shelved_goals: List[Obligation]
     given_up_goals: List[Obligation]
 
+    def __eq__(self, other):
+        for goals, goals_other in zip([self.fg_goals, self.bg_goals, self.shelved_goals, self.given_up_goals],
+                                    [other.fg_goals, other.bg_goals, other.shelved_goals, other.given_up_goals]):
+            if len(goals) != len(goals_other):
+                return False
+            for goal, goal_other in zip(goals, goals_other):
+                if goal != goal_other:
+                    return False
+
+        return True
+
     @classmethod
     def empty(cls: Type['ProofContext']):
         return ProofContext([], [], [], [])

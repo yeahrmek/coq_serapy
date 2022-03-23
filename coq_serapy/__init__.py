@@ -294,8 +294,6 @@ class SerapiInstance(threading.Thread):
         self._fout = self._proc.stdout
         self._fin = self._proc.stdin
 
-        self._do_reset = False
-
         # Initialize some state that we'll use to keep track of the
         # coq state. This way we don't have to do expensive queries to
         # the other process to answer simple questions.
@@ -731,6 +729,7 @@ class SerapiInstance(threading.Thread):
             if 'timing out' in str(e).lower() and not self._hist[-1][1]:
                 self._hist = self._hist[:-1]
                 self.reset()
+                raise CoqAnomaly('Goal query (probably) timed out. Resetting coq.')
         finally:
             if self.proof_context and self.verbose >= 3:
                 eprint(
@@ -1249,11 +1248,12 @@ class SerapiInstance(threading.Thread):
                 raise e
 
     def cancel_failed(self) -> None:
-        if self._do_reset:
-            self.reset()
-            self._do_reset = False
-        else:
-            self.__cancel()
+        # if the last cur_state coincides with the cur state in history
+        # and the last record in history is successful, then
+        # we don't need to cancel anything
+        if self._hist[-1][-1] == self.cur_state and self._hist[-1][1]:
+            return
+        self.__cancel()
 
 
     def _get_cancelled(self) -> int:
@@ -1765,18 +1765,12 @@ class SerapiInstance(threading.Thread):
 
     def reset(self):
         self._n_resets += 1
-        print("reset")
-        for x in self._hist:
-            print(x[0])
-        print()
         hist = self._hist.copy()
         self.kill()
         self.init()
         self._hist = []
         for stm, not_failed, state in hist:
             self.run_stmt(stm)
-
-        self._do_reset = False
 
 
 goal_regex = re.compile(r"\(\(info\s*\(\(evar\s*\(Ser_Evar\s*(\d+)\)\)"
