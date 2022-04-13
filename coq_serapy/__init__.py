@@ -795,29 +795,15 @@ class SerapiInstance(threading.Thread):
                 raise CoqAnomaly(coqexn_msg)
             elif "Unable to unify" in coqexn_msg:
                 self._get_completed()
-                # self.cancel_failed()
+                self.cancel_failed()
                 raise CoqExn(coqexn_msg)
             elif re.match(r".*The identifier (.*) is reserved\..*",
                           coqexn_msg):
                 self._get_completed()
                 raise CoqExn(coqexn_msg)
-            elif re.match(r".*The reference (.*) was not found in the current environment\..*",
-                          coqexn_msg):
-                self._get_completed()
-                raise CoqExn(coqexn_msg)
-            elif re.match(r".*An unnamed user-defined tactic was not fully applied",
-                          coqexn_msg):
-                self._get_completed()
-                raise CoqExn(coqexn_msg)
-            if 'Illegal tactic application' in coqexn_msg or \
-                'Not a contradiction' in coqexn_msg:
-                self._get_completed()
-                raise CoqExn(coqexn_msg)
-
             else:
                 self._get_completed()
-                if self.prev_state != self.cur_state:
-                    self.cancel_failed()
+                self.cancel_failed()
                 raise CoqExn(coqexn_msg)
         else:
             match(normalizeMessage(e.msg),
@@ -1239,7 +1225,8 @@ class SerapiInstance(threading.Thread):
             tactic_history = self.tactic_history.getFullHistory()
             if tactic_history and tactic_history[-1][1] == cancelled_state:
                 self.tactic_history.removeLast(context_before.fg_goals)
-            self._hist = self._hist[:-1]
+            if self._hist[-1][-1] == cancelled_state:
+                self._hist = self._hist[:-1]
         except Exception as e:
             if self.reset_on_cancel_fail:
                 self._hist = self._hist[:-1]
