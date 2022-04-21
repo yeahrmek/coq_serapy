@@ -681,15 +681,9 @@ class SerapiInstance(threading.Thread):
                 if is_goal_open:
                     self._get_enter_goal_context()
                 elif is_goal_close or is_unshelve:
-                    self._get_proof_context(update_nonfg_goals=True)  # TODO: if it takes too long
-                                                                      # then mark it will raise TimoeutError
-                                                                      # and then next tactic or cancelling will
-                                                                      # also raise TimeoutError. Try to avoid double TimeoutError
+                    self._get_proof_context(update_nonfg_goals=True)
                 else:
-                    self._get_proof_context(update_nonfg_goals=False)  # TODO: if it takes too long
-                                                                      # then mark it will raise TimoeutError
-                                                                      # and then next tactic or cancelling will
-                                                                      # also raise TimeoutError. Try to avoid double TimeoutError
+                    self._get_proof_context(update_nonfg_goals=False)
 
                 if not context_before and self.proof_context:
                     self._add_potential_local_lemmas(stm)
@@ -1241,7 +1235,6 @@ class SerapiInstance(threading.Thread):
         if self._hist[-1][-1] == self.cur_state and self._hist[-1][1]:
             return
         self.__cancel()
-
 
     def _get_cancelled(self) -> int:
         try:
@@ -2628,7 +2621,6 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
     linear_commands = []
     prev_cmd = ''
     for cmd in commands:
-
         # Check parenthesis structure.
         if prev_cmd:
             cmd = prev_cmd + cmd
@@ -2636,39 +2628,13 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
 
         if not _is_parentheses_correct(cmd):
             prev_cmd = cmd
+            print('---- continue')
             continue
 
         if in_proof:
             cmd = cmd.strip()
 
-            # # Remove bullets
-            # if remove_bullets:
-            #     match = re.match(r'([-]+(?![-*+]+))|([+]+(?![+*-]+))|([*]+(?![*-+]+))', cmd)
-            #     if match:
-            #         cmd = cmd[match.span()[1]:]
-
-            #     if open_curly_bracket and cmd.endswith('}'):
-            #         open_curly_bracket = False
-            #         coq.run_stmt(cmd)
-            #         linear_commands.append(cmd)
-            #         continue
-            #     else:
-            #         # remove curly braces
-            #         if cmd.startswith('{') or cmd.startswith('}'):
-            #             cmd = cmd[1:].strip()
-            #         if cmd.endswith('}'):
-            #             cmd = cmd[:-1].strip()
-            #         elif cmd.endswith('{'):
-            #             open_curly_bracket = True
-            #             coq.run_stmt(cmd)
-            #             linear_commands.append(cmd)
-            #             continue
-            # elif cmd[-1] in ['-', '+', '*']:
-            #     print(cmd)
-            #     coq.run_stmt(cmd)
-            #     linear_commands.append(cmd)
-            #     continue
-
+            # skip bullet
             if (cmd[-1] in ['+', '-', '*', '{', '}'] or
                 'Ltac' in cmd or
                 'cycle ' in cmd or
@@ -2696,7 +2662,7 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
                 n_goals = len(coq.proof_context.fg_goals)
 
                 first_tac = ''
-                coq.create_checkpoint()
+                checkpoint_state = coq._hist[-1][-1]
 
                 for i, term in enumerate(terms.copy()):
                     next_tac = _replace_bullet_tactic(term) + '.'
@@ -2776,14 +2742,17 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
                     except SerapiException as e:
                         prev_tactic = tactic
 
+                        # TODO: something went wrong
+                        if coq.cur_state < checkpoint_state:
+                            raise e
+
                 # if application of the last terms is unsuccessfull just accept cmd as is
                 if prev_tactic:
-                    coq.restore_last_checkpoint()
+                    while coq.cur_state != checkpoint_state:
+                        coq.cancel_last()
                     coq.run_stmt(cmd)
                     linear_commands.append(cmd)
                 else:
-                    states = coq._states.pop()
-                    coq._states[-1].extend(states)
                     linear_commands.extend(tactics_to_append)
         else:
             coq.run_stmt(cmd)
