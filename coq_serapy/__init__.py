@@ -2628,7 +2628,6 @@ def linearize_commands(project_path, module_path, remove_bullets=False, timeout=
 
         if not _is_parentheses_correct(cmd):
             prev_cmd = cmd
-            print('---- continue')
             continue
 
         if in_proof:
