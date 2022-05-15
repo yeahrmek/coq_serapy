@@ -204,7 +204,7 @@ class TacticHistory:
         def generate() -> Iterable[str]:
             curTree = self.__tree
             for i in range(self.__cur_subgoal_depth+1):
-                yield from (child[0] for child in curTree.children
+                yield from (child for child in curTree.children
                             if isinstance(child, tuple))
                 if i < self.__cur_subgoal_depth:
                     assert isinstance(curTree.children[-1], TacticTree)
@@ -400,18 +400,6 @@ class SerapiInstance(threading.Thread):
                 cached = lemma.replace("\n", "")
             if self._local_lemmas_cache is not None:
                 self._local_lemmas_cache.append(cached)
-
-        #for l_idx in range(len(self.local_lemmas)):
-        #    for ol_idx in range(l_idx):
-        #        if l_idx == ol_idx:
-        #            continue
-        #        if self.local_lemmas[l_idx][0] == ":":
-        #            continue
-        #        if self._local_lemmas[l_idx][1]:
-        #            continue
-        #        assert self.local_lemmas[l_idx] != \
-        #            self.local_lemmas[ol_idx],\
-        #            self.local_lemmas
 
     def _lemmas_defined_by_stmt(self, cmd: str) -> List[str]:
         cmd = kill_comments(cmd)
@@ -1213,10 +1201,11 @@ class SerapiInstance(threading.Thread):
 
             # Get the response from cancelling
             self.cur_state = self._get_cancelled()
+
             # Get a new proof context, if it exists
             self._get_proof_context()
 
-            tactic_history = self.tactic_history.getFullHistory()
+            tactic_history = self.tactic_history.getCurrentHistory()
             if tactic_history and tactic_history[-1][1] == cancelled_state:
                 self.tactic_history.removeLast(context_before.fg_goals)
             if self._hist[-1][-1] == cancelled_state:
