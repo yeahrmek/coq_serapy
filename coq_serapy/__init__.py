@@ -491,7 +491,6 @@ class SerapiInstance(threading.Thread):
     # get it. NOT FOR EXTERNAL USE
     def _send_flush(self, cmd: str):
         assert self._fin
-        print(cmd)
         eprint("SENT: " + cmd, guard=self.verbose >= 4)
         if self.log_outgoing_messages:
             with open(self.log_outgoing_messages, 'w') as f:
