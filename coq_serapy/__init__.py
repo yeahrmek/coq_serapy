@@ -322,13 +322,7 @@ class SerapiInstance(threading.Thread):
         # Execute the commands corresponding to include flags we were
         # passed
 
-        prelude = self.module_path
-        while prelude != self.project_path:
-            prelude = prelude.parent
-            if (prelude / '_CoqProject').is_file():
-                with open(prelude / "_CoqProject", 'r') as includesfile:
-                    includes = includesfile.read()
-                self._exec_includes(includes, str(prelude))
+        self.prelude(self.module_path, self.project_path)
 
         # Unset Printing Notations (to get more learnable goals?)
         self._unset_printing_notations()
@@ -343,6 +337,15 @@ class SerapiInstance(threading.Thread):
             except TimeoutError:
                 eprint("Failed to initialize hammer!")
                 raise
+
+    def prelude(self, module_path, project_path):
+        prelude = module_path
+        while prelude != project_path:
+            prelude = prelude.parent
+            if (prelude / '_CoqProject').is_file():
+                with open(prelude / "_CoqProject", 'r') as includesfile:
+                    includes = includesfile.read()
+                self._exec_includes(includes, str(prelude))
 
     @property
     def module_stack(self) -> List[str]:
@@ -488,6 +491,7 @@ class SerapiInstance(threading.Thread):
     # get it. NOT FOR EXTERNAL USE
     def _send_flush(self, cmd: str):
         assert self._fin
+        print(cmd)
         eprint("SENT: " + cmd, guard=self.verbose >= 4)
         if self.log_outgoing_messages:
             with open(self.log_outgoing_messages, 'w') as f:
