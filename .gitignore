@@ -4,4 +4,6 @@ __pycache__/
 coq_serapy/.ipynb_checkpoints/
 
 *.egg-info/
+.DS_Store
 
+.vscode/

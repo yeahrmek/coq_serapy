@@ -278,6 +278,7 @@ class SerapiInstance(threading.Thread):
         self.verbose = verbose
         # Set the "extra quiet" flag (don't print on failures) to false
         self.quiet = quiet
+        self._added_libs = set()
 
         self.init()
 
@@ -1281,6 +1282,11 @@ class SerapiInstance(threading.Thread):
                     .format(origpath, logicalpath))
         else:
             addStm = f'(Add () "Add LoadPath \\\"{origpath}\\\".")\n'
+
+        if addStm in self._added_libs:
+            return
+        self._added_libs.add(addStm)
+
         self._send_acked(addStm)
         self._update_state()
         self._get_completed()
@@ -1292,6 +1298,11 @@ class SerapiInstance(threading.Thread):
     def add_ocaml_lib(self, path: str) -> None:
         addStm = ("(Add () \"Add ML Path \\\"{}\\\".\")\n"
                   .format(path))
+
+        if addStm in self._added_libs:
+            return
+        self._added_libs.add(addStm)
+
         self._send_acked(addStm)
         self._update_state()
         self._get_completed()
@@ -1303,6 +1314,9 @@ class SerapiInstance(threading.Thread):
     def add_lib_rec(self, origpath: str, logicalpath: str) -> None:
         addStm = ("(Add () \"Add Rec LoadPath \\\"{}\\\" as {}.\")\n"
                   .format(origpath, logicalpath))
+        if addStm in self._added_libs:
+            return
+        self._added_libs.add(addStm)
         self._send_acked(addStm)
         self._update_state()
         self._get_completed()
